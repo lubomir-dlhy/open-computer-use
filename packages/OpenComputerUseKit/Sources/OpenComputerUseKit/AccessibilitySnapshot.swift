@@ -359,8 +359,9 @@ enum SnapshotBuilder {
             return computerUseNoWindowFoundMessage
         }
         return computerUseNoWindowFoundMessage
-            + ". The app has no usable window (minimized or hidden) and Open Computer Use does not bring windows"
-            + " forward. Ask the user to restore it; afterwards it can stay covered by other windows."
+            + ". The app has no usable window (hidden, or minimized and it could not be moved to the agent display)"
+            + " and Open Computer Use does not bring windows forward. Ask the user to show it; afterwards it can stay"
+            + " covered by other windows."
     }
 
     private static func recoverVisibleWindow(for app: RunningAppDescriptor, appElement: AXUIElement, preferredWindow: AXUIElement?) -> Bool {

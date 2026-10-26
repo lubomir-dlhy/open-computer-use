@@ -674,11 +674,16 @@ public final class ComputerUseService {
     ) throws -> ToolCallResult {
         try observation.validate()
         guard windowPlacement != .keep else {
-            return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, observation: observation), style: .fullState)
+            return snapshotResult(
+                for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation),
+                style: .fullState
+            )
         }
 
         // Explicit placements never activate or raise; they only move the frame.
-        let snapshot = try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+        let snapshot = windowPlacement == .agentDisplay
+            ? try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+            : try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
         guard snapshot.mode != .fixture else {
             throw ComputerUseError.message("window_placement '\(windowPlacement.rawValue)' is not supported for fixture apps")
         }
@@ -690,6 +695,11 @@ public final class ComputerUseService {
             try AgentDisplay.shared.park(windowID: windowID, pid: snapshot.app.pid, window: windowElement)
         case .restore:
             try AgentDisplay.shared.restoreAll(pid: snapshot.app.pid)
+            do {
+                return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
+            } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
+                return ToolCallResult.text("Restored the app's windows; they are minimized again, as before.")
+            }
         case .keep:
             break
         }
@@ -1306,6 +1316,26 @@ public final class ComputerUseService {
     }
 
     @discardableResult
+    /// A minimized window is un-minimized on the agent display instead of in front of the user.
+    private func snapshotParkingMinimizedWindow(
+        for query: String,
+        textLimit: SnapshotTextLimit,
+        treeLimits: AccessibilityTreeLimits,
+        recoveryPolicy: SnapshotRecoveryPolicy,
+        observation: SnapshotObservationOptions
+    ) throws -> AppSnapshot {
+        do {
+            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: recoveryPolicy, observation: observation)
+        } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
+            guard !foregroundActivationEnabled(),
+                  AgentDisplay.shared.isSupported,
+                  try AgentDisplay.shared.parkMinimizedWindow(pid: AppDiscovery.resolve(query).pid) else {
+                throw ComputerUseError.stateUnavailable(message)
+            }
+            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+        }
+    }
+
     private func refreshSnapshot(
         for query: String,
         textLimit: SnapshotTextLimit = .defaults,

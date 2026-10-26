@@ -1959,6 +1959,12 @@ final class OpenComputerUseKitTests: XCTestCase {
         let huge = agentDisplayPlacement(windowSize: CGSize(width: 4000, height: 3000), displayBounds: display)
         XCTAssertEqual(huge, CGPoint(x: 1512, y: 0), "oversized windows are pinned to the display origin")
         XCTAssertTrue(display.contains(huge))
+        XCTAssertEqual(agentDisplaySize(userDisplays: []), CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(agentDisplaySize(userDisplays: [CGRect(x: 0, y: 0, width: 1512, height: 982)]), CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(
+            agentDisplaySize(userDisplays: [CGRect(x: 0, y: 0, width: 2048, height: 1330), CGRect(x: 2048, y: 0, width: 1920, height: 1080)]),
+            CGSize(width: 2128, height: 1410)
+        )
         for name in ["get_app_state"] {
             let tool = ToolDefinitions.all.first { $0.name == name }
             let properties = tool?.inputSchema["properties"] as? [String: Any]

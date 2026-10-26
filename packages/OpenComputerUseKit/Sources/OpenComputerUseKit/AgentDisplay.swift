@@ -37,6 +37,17 @@ func agentDisplayPlacement(windowSize: CGSize, displayBounds: CGRect, inset: CGF
     )
 }
 
+/// Size of the agent display: large enough for any window that fits on one of
+/// the user's displays, so a parked window never spills back onto them.
+func agentDisplaySize(userDisplays: [CGRect], minimum: CGSize = CGSize(width: 1920, height: 1080), inset: CGFloat = 40) -> CGSize {
+    let width = userDisplays.map(\.width).max() ?? 0
+    let height = userDisplays.map(\.height).max() ?? 0
+    return CGSize(
+        width: max(minimum.width, (width + 2 * inset).rounded(.up)),
+        height: max(minimum.height, (height + 2 * inset).rounded(.up))
+    )
+}
+
 /// The agent's own display: a virtual display (the mechanism behind Screen
 /// Sharing's headless sessions) that the user never sees. A window parked on it
 /// is genuinely on screen for WindowServer, so its app renders it, exposes its
@@ -47,7 +58,6 @@ func agentDisplayPlacement(windowSize: CGSize, displayBounds: CGRect, inset: CGF
 final class AgentDisplay: @unchecked Sendable {
     static let shared = AgentDisplay()
 
-    static let displaySize = CGSize(width: 1920, height: 1080)
     // Upper bounds for the polls; the observed values are far lower and are
     // logged with OPEN_COMPUTER_USE_DEBUG_TIMING=1.
     static let displaySettle: TimeInterval = 3.0
@@ -60,6 +70,7 @@ final class AgentDisplay: @unchecked Sendable {
         let pid: pid_t
         let element: AXUIElement
         let originalPosition: CGPoint
+        var wasMinimized = false
     }
 
     private let lock = NSLock()
@@ -91,7 +102,7 @@ final class AgentDisplay: @unchecked Sendable {
 
     /// Move `window` onto the agent display. Returns the display bounds.
     @discardableResult
-    func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement) throws -> CGRect {
+    func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement, unminimize: Bool = false) throws -> CGRect {
         lock.lock()
         defer { lock.unlock() }
 
@@ -104,10 +115,25 @@ final class AgentDisplay: @unchecked Sendable {
             throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not read the window position")
         }
         let size = axSize(window) ?? CGSize(width: 800, height: 600)
+        guard size.width <= bounds.width, size.height <= bounds.height else {
+            throw ComputerUseError.stateUnavailable("window_placement 'agent_display' cannot fit a \(Int(size.width))x\(Int(size.height)) window on the agent display")
+        }
         let target = agentDisplayPlacement(windowSize: size, displayBounds: bounds)
         let start = TimingLog.now()
         try setAXPosition(window, target)
-        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position)
+        if unminimize {
+            // Un-minimizing before the move has landed would show the window on the user's display.
+            guard let moved = axPoint(window, kAXPositionAttribute as String),
+                  abs(moved.x - target.x) < 1, abs(moved.y - target.y) < 1 else {
+                try? setAXPosition(window, position)
+                throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not move the minimized window onto the agent display")
+            }
+            guard AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success else {
+                try? setAXPosition(window, position)
+                throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not un-minimize the window")
+            }
+        }
+        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position, wasMinimized: unminimize)
         installExitHookIfNeeded()
         waitForWindow(windowID, toLandOn: displaySpaceIDs, or: bounds)
         TimingLog.log("agent_display.park", since: start)
@@ -157,6 +183,15 @@ final class AgentDisplay: @unchecked Sendable {
             return
         }
         let start = TimingLog.now()
+        if entry.wasMinimized {
+            AXUIElementSetAttributeValue(entry.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            // A minimized window has no on-screen frame to confirm the move against.
+            try? setAXPosition(entry.element, entry.originalPosition)
+            parked.removeValue(forKey: windowID)
+            TimingLog.log("agent_display.restore", since: start)
+            destroyDisplayIfIdle()
+            return
+        }
         do {
             try setAXPosition(entry.element, entry.originalPosition)
         } catch {
@@ -190,6 +225,28 @@ final class AgentDisplay: @unchecked Sendable {
         parked.removeValue(forKey: windowID)
         TimingLog.log("agent_display.restore", since: start)
         destroyDisplayIfIdle()
+    }
+
+    /// Park the app's first minimized window, un-minimizing it on the agent display
+    /// so it never appears on the user's. Returns false when there is none.
+    func parkMinimizedWindow(pid: pid_t) throws -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else {
+            return false
+        }
+        for window in windows {
+            var minimized: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success,
+                  (minimized as? Bool) == true,
+                  let windowID = SkyLightSPI.shared.windowID(for: window) else {
+                continue
+            }
+            try park(windowID: windowID, pid: pid, window: window, unminimize: true)
+            return true
+        }
+        return false
     }
 
     func restoreAll() {
@@ -232,7 +289,8 @@ final class AgentDisplay: @unchecked Sendable {
         let spacesBefore = Set((spi.managedDisplaySpaces() ?? [:]).values.flatMap { $0 })
         let start = TimingLog.now()
         var newHandle: UnsafeMutableRawPointer?
-        let id = ocu_virtual_display_create("Open Computer Use", UInt32(Self.displaySize.width), UInt32(Self.displaySize.height), 60, &newHandle)
+        let size = agentDisplaySize(userDisplays: Self.activeDisplayBounds())
+        let id = ocu_virtual_display_create("Open Computer Use", UInt32(size.width), UInt32(size.height), 60, &newHandle)
         guard id != 0, let newHandle else {
             throw ComputerUseError.message("window_placement 'agent_display' could not create the agent display")
         }
@@ -259,6 +317,13 @@ final class AgentDisplay: @unchecked Sendable {
         displaySpaceIDs = newSpaces
         TimingLog.log("agent_display.ready", since: start)
         return displayBounds ?? .zero
+    }
+
+    private static func activeDisplayBounds() -> [CGRect] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(UInt32(ids.count), &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
     }
 
     private func destroyDisplayIfIdle() {
