@@ -219,7 +219,7 @@ enum SnapshotBuilder {
 
         var rootWindow: AXUIElement
         guard let resolvedFocusedWindow = focusedWindow else {
-            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+            throw ComputerUseError.stateUnavailable(backgroundNoWindowMessage)
         }
         rootWindow = resolvedFocusedWindow
 
@@ -245,7 +245,7 @@ enum SnapshotBuilder {
         }
 
         guard let windowCapture else {
-            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+            throw ComputerUseError.stateUnavailable(backgroundNoWindowMessage)
         }
 
         return buildAccessibilitySnapshot(
@@ -352,6 +352,15 @@ enum SnapshotBuilder {
             screenshotNote: screenshot.note,
             observation: observation
         )
+    }
+
+    private static var backgroundNoWindowMessage: String {
+        guard !foregroundActivationEnabled() else {
+            return computerUseNoWindowFoundMessage
+        }
+        return computerUseNoWindowFoundMessage
+            + ". The app has no usable window (minimized or hidden) and Open Computer Use does not bring windows"
+            + " forward. Ask the user to restore it; afterwards it can stay covered by other windows."
     }
 
     private static func recoverVisibleWindow(for app: RunningAppDescriptor, appElement: AXUIElement, preferredWindow: AXUIElement?) -> Bool {
