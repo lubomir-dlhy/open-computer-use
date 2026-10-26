@@ -407,6 +407,14 @@ enum SoftwareCursorOverlay {
             isWindowPresent(targetWindow.windowID) ? targetWindow : nil
         }
 
+        // A target that is hidden, minimized or on another Space has nothing on this
+        // screen to sit above; ordering against it would float the cursor over other apps.
+        if let effectiveTargetWindow, !isWindowOnScreen(effectiveTargetWindow.windowID) {
+            panel.orderOut(nil)
+            activeTargetWindow = effectiveTargetWindow
+            return
+        }
+
         let desiredLevel = NSWindow.Level(rawValue: effectiveTargetWindow?.layer ?? 0)
         if panel.level != desiredLevel {
             panel.level = desiredLevel
@@ -627,7 +635,15 @@ enum SoftwareCursorOverlay {
             return
         }
 
-        configureOrdering(relativeTo: nil)
+        panel?.orderOut(nil)
+        self.activeTargetWindow = nil
+    }
+
+    private static func isWindowOnScreen(_ windowID: CGWindowID) -> Bool {
+        guard let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first else {
+            return false
+        }
+        return info[kCGWindowIsOnscreen as String] as? Bool ?? false
     }
 
     private static func animateClickPulse(at point: CGPoint, clickCount: Int, mouseButton: MouseButtonKind) {
