@@ -267,7 +267,9 @@ When the gate is not enabled, treat window-server drags as unavailable and reach
 
 Every interaction must leave the user's frontmost app, window order and pointer untouched:
 
-- `get_app_state` and actions never activate, unhide, un-minimize or raise the target. A minimized or hidden window returns `cgWindowNotFound`; ask the user to restore it. Once visible it can stay covered by other windows.
+- `get_app_state` and actions never activate, unhide or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) returns `cgWindowNotFound`; ask the user to show it.
+- Native context menus (AppKit menus, not menus a web page draws) do not open in a background app: a right-click reaches the app but the menu closes at once. Use the element's accessibility actions instead.
+- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks.
 - Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
 - Avoid app shortcuts that bring their own window forward. In Chrome, `cmd+l` raises the browser window; to navigate, `sky_click` the address bar, `set_value` the URL on the address field, then `press_key` `Return` with `key_method: "sky_key"`.
 - Do not set `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS` or `OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION` unless the user explicitly asks for foreground behavior.
