@@ -248,7 +248,7 @@ open-computer-use call --calls '[
 
 ## Drag Delivery
 
-`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium only dispatches the intermediate moves while the window is visible on screen; a fully covered Chromium window sees just the press and release.
+`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium appears to drop the intermediate moves unless the user's real pointer is over its window, even when it is visible or parked on the agent display; then the page sees only the press and release. Native AppKit apps receive every move.
 
 ```sh
 open-computer-use call drag --args '{"app":"Google Chrome","from_x":400,"from_y":250,"to_x":880,"to_y":250,"drag_method":"sky","path":[[500,320],[640,345],[780,320]],"modifiers":["shift"]}'
