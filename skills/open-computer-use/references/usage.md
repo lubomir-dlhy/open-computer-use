@@ -189,7 +189,7 @@ open-computer-use snapshot --max-tree-nodes 3000 --max-tree-depth 96 "Google Chr
 
 - `accessibility`: only invoke the element's accessibility action and require `element_index`.
 - `app_post`: bypass accessibility and post a mouse event directly to the target app/window without moving the system pointer. Supported on macOS and Windows.
-- `sky_click`: use the macOS private SkyLight background-window path with target-only synthetic focus and a Chromium primer click. It supports left single/double click on a current, on-screen window in the same Space and does not move the system pointer, deactivate the foreground app, change its key/first-responder state, or raise the target window. Its action-result snapshot refresh is read-only. Supported on macOS only.
+- `sky_click`: use the macOS private SkyLight background-window path with target-only synthetic focus and a Chromium primer click. It supports `mouse_button` left, right or middle, `click_count` 1 to 3, and `modifiers` (`cmd`, `shift`, `option`, `control`) on a current, on-screen window in the same Space and does not move the system pointer, deactivate the foreground app, change its key/first-responder state, or raise the target window. Its action-result snapshot refresh is read-only. Supported on macOS only.
 - `global`: bypass accessibility and use the desktop's global pointer path. Supported on macOS, Windows and Linux, and requires `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` because it may move the real pointer or change foreground focus.
 
 Use `app_post` for an exact blank-area or overlay click that must not be redirected to an accessibility descendant:
@@ -248,14 +248,29 @@ open-computer-use call --calls '[
 
 ## Drag Delivery
 
-`drag` has no method parameter. On macOS the path it takes is decided by the same process-level gate that authorizes `click_method: "global"`:
+`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium only dispatches the intermediate moves while the window is visible on screen; a fully covered Chromium window sees just the press and release.
+
+```sh
+open-computer-use call drag --args '{"app":"Google Chrome","from_x":400,"from_y":250,"to_x":880,"to_y":250,"drag_method":"sky","path":[[500,320],[640,345],[780,320]],"modifiers":["shift"]}'
+```
+
+Without `drag_method` (`auto`), the path is decided by the same process-level gate that authorizes `click_method: "global"`:
 
 - Gate unset (default): mouse move / down / dragged / up events are posted directly to the target process with `CGEvent.postToPid`. The system pointer does not move and foreground focus is unchanged. Because the events never pass through the window server, this path cannot start a window-server drag session: window moves, drag-selecting text, and Finder drag-and-drop return without error but have no visible effect.
 - `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` set for the server process: the drag uses the global pointer path, which drives window-server drag sessions but may move the real pointer and change foreground focus.
 
-Every non-fixture `drag` result includes a text item that begins `Drag delivered via app_post` or `Drag delivered via global pointer path`, so a default drag that did nothing is legible instead of looking like success. For an MCP server the variable belongs in the server entry's `env`, not in the calling shell, and the server must be restarted afterwards.
+Every non-fixture `drag` result includes a text item that begins `Drag delivered via app_post`, `Drag delivered via SkyLight` or `Drag delivered via global pointer path`, so a default drag that did nothing is legible instead of looking like success. For an MCP server the variable belongs in the server entry's `env`, not in the calling shell, and the server must be restarted afterwards.
 
 When the gate is not enabled, treat window-server drags as unavailable and reach the same outcome another way: copy or move files with a shell command instead of a Finder drag, use `set_value` or keyboard selection instead of drag-selecting text, and use the app's own window controls instead of dragging a title bar.
+
+## Staying in the Background (macOS)
+
+Every interaction must leave the user's frontmost app, window order and pointer untouched:
+
+- `get_app_state` and actions never activate, unhide, un-minimize or raise the target. A minimized or hidden window returns `cgWindowNotFound`; ask the user to restore it. Once visible it can stay covered by other windows.
+- Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
+- Avoid app shortcuts that bring their own window forward. In Chrome, `cmd+l` raises the browser window; to navigate, `sky_click` the address bar, `set_value` the URL on the address field, then `press_key` `Return` with `key_method: "sky_key"`.
+- Do not set `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS` or `OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION` unless the user explicitly asks for foreground behavior.
 
 ## Text Selection (macOS)
 
