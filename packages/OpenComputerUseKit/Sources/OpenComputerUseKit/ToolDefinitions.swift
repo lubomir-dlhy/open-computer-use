@@ -49,6 +49,10 @@ public enum ToolDefinitions {
                         description: "Click implementation: auto (default), accessibility, app_post, sky_click, or global. Accessibility requires element_index. app_post sends a public event directly to the target app. sky_click uses the macOS SkyLight background window path. Global may move the system pointer and requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1.",
                         enumValues: ClickMethod.allCases.map(\.rawValue)
                     ),
+                    "modifiers": stringArrayProperty(
+                        description: "Modifier keys held during the click (sky_click only): cmd, shift, option, control.",
+                        enumValues: ["cmd", "shift", "option", "control"]
+                    ),
                 ],
                 required: ["app"]
             )
@@ -67,6 +71,13 @@ public enum ToolDefinitions {
                     "drag_method": stringProperty(
                         description: "auto (default) keeps the gate-based choice; sky posts through SkyLight to the target window without moving the system pointer, for Chromium web content; app_post and global force those paths.",
                         enumValues: DragMethod.allCases.map(\.rawValue)
+                    ),
+                    "path": pointArrayProperty(
+                        description: "Intermediate [x, y] screenshot points visited in order between from and to (drag_method sky only), for curves and freehand strokes."
+                    ),
+                    "modifiers": stringArrayProperty(
+                        description: "Modifier keys held during the drag (drag_method sky only): cmd, shift, option, control.",
+                        enumValues: ["cmd", "shift", "option", "control"]
                     ),
                 ],
                 required: ["app", "from_x", "from_y", "to_x", "to_y"]
@@ -254,6 +265,27 @@ private func stringProperty(description: String, enumValues: [String]? = nil) ->
     }
 
     return property
+}
+
+private func stringArrayProperty(description: String, enumValues: [String]) -> [String: Any] {
+    [
+        "type": "array",
+        "description": description,
+        "items": ["type": "string", "enum": enumValues],
+    ]
+}
+
+private func pointArrayProperty(description: String) -> [String: Any] {
+    [
+        "type": "array",
+        "description": description,
+        "items": [
+            "type": "array",
+            "items": ["type": "number"],
+            "minItems": 2,
+            "maxItems": 2,
+        ],
+    ]
 }
 
 private func integerProperty(description: String) -> [String: Any] {

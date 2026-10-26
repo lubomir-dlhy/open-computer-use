@@ -83,23 +83,48 @@ func parseKeyMethod(_ rawValue: String?) throws -> KeyMethod {
 func validateSkyClickArguments(
     method: ClickMethod,
     mouseButton: String,
-    clickCount: Int
+    clickCount: Int,
+    modifiers: CGEventFlags = []
 ) throws {
     guard method == .skyClick else {
+        if !modifiers.isEmpty {
+            throw ComputerUseError.message("modifiers are only supported with click_method 'sky_click'")
+        }
         return
     }
 
-    guard mouseButton.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == MouseButtonKind.left.rawValue else {
+    guard MouseButtonKind(rawValue: mouseButton.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) != nil else {
         throw ComputerUseError.message(
-            "click_method 'sky_click' only supports mouse_button 'left'"
+            "click_method 'sky_click' supports mouse_button left, right or middle"
         )
     }
 
-    guard (1...2).contains(clickCount) else {
+    guard (1...3).contains(clickCount) else {
         throw ComputerUseError.message(
-            "click_method 'sky_click' supports click_count 1 or 2"
+            "click_method 'sky_click' supports click_count 1, 2 or 3"
         )
     }
+}
+
+func parseMouseModifiers(_ rawValues: [String]?) throws -> CGEventFlags {
+    var flags: CGEventFlags = []
+    for rawValue in rawValues ?? [] {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cmd", "command":
+            flags.insert(.maskCommand)
+        case "shift":
+            flags.insert(.maskShift)
+        case "option", "alt":
+            flags.insert(.maskAlternate)
+        case "control", "ctrl":
+            flags.insert(.maskControl)
+        default:
+            throw ComputerUseError.message(
+                "Invalid modifier '\(rawValue)'. Expected any of: cmd, shift, option, control"
+            )
+        }
+    }
+    return flags
 }
 
 struct VisualCursorScreenMapping: Equatable {
@@ -667,7 +692,8 @@ public final class ComputerUseService {
         y: Double?,
         clickCount: Int,
         mouseButton: String,
-        clickMethod: ClickMethod = .auto
+        clickMethod: ClickMethod = .auto,
+        modifiers: CGEventFlags = []
     ) throws -> ToolCallResult {
         try validateClickMethod(
             clickMethod,
@@ -677,7 +703,8 @@ public final class ComputerUseService {
         try validateSkyClickArguments(
             method: clickMethod,
             mouseButton: mouseButton,
-            clickCount: clickCount
+            clickCount: clickCount,
+            modifiers: modifiers
         )
 
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
@@ -765,6 +792,7 @@ public final class ComputerUseService {
                 case .appPost, .skyClick, .global:
                     try performExplicitMouseClick(
                         method: clickMethod,
+                        modifiers: modifiers,
                         at: targetPoint,
                         windowPoint: windowPoint,
                         button: button,
@@ -825,6 +853,7 @@ public final class ComputerUseService {
                 case .appPost, .skyClick, .global:
                     try performExplicitMouseClick(
                         method: clickMethod,
+                        modifiers: modifiers,
                         at: targetPoint,
                         windowPoint: point,
                         button: button,
@@ -920,7 +949,16 @@ public final class ComputerUseService {
         return try actionResult(for: query)
     }
 
-    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double, dragMethod: DragMethod = .auto) throws -> ToolCallResult {
+    public func drag(
+        app query: String,
+        fromX: Double,
+        fromY: Double,
+        toX: Double,
+        toY: Double,
+        dragMethod: DragMethod = .auto,
+        via waypoints: [CGPoint] = [],
+        modifiers: CGEventFlags = []
+    ) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
         guard snapshot.observation.includeScreenshot else {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
@@ -931,16 +969,15 @@ public final class ComputerUseService {
             return try actionResult(for: query)
         }
 
-        let startWindowPoint = try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: CGPoint(x: fromX, y: fromY))
-        let endWindowPoint = try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: CGPoint(x: toX, y: toY))
-        let start = try windowPointToGlobalPoint(snapshot: snapshot, point: startWindowPoint)
-        let end = try windowPointToGlobalPoint(snapshot: snapshot, point: endWindowPoint)
+        let windowPoints = try ([CGPoint(x: fromX, y: fromY)] + waypoints + [CGPoint(x: toX, y: toY)]).map {
+            try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: $0)
+        }
+        let globalPoints = try windowPoints.map { try windowPointToGlobalPoint(snapshot: snapshot, point: $0) }
         let path = try performDragEvent(
-            from: start,
-            to: end,
-            startWindowPoint: startWindowPoint,
-            endWindowPoint: endWindowPoint,
+            windowPoints: windowPoints,
+            globalPoints: globalPoints,
             method: dragMethod,
+            modifiers: modifiers,
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
@@ -2265,17 +2302,20 @@ public final class ComputerUseService {
     }
 
     private func performDragEvent(
-        from start: CGPoint,
-        to end: CGPoint,
-        startWindowPoint: CGPoint,
-        endWindowPoint: CGPoint,
+        windowPoints: [CGPoint],
+        globalPoints: [CGPoint],
         method: DragMethod,
+        modifiers: CGEventFlags,
         targetDescription: String,
         snapshot: AppSnapshot
     ) throws -> DragDeliveryPath {
-        let eventStart = inputEventPoint(fromScreenStatePoint: start)
-        let eventEnd = inputEventPoint(fromScreenStatePoint: end)
+        let eventPoints = globalPoints.map { inputEventPoint(fromScreenStatePoint: $0) }
+        let eventStart = eventPoints[0]
+        let eventEnd = eventPoints[eventPoints.count - 1]
         let path = try dragDeliveryPath(environment: ProcessInfo.processInfo.environment, method: method)
+        if path != .sky, eventPoints.count > 2 || !modifiers.isEmpty {
+            throw ComputerUseError.message("path and modifiers are only supported with drag_method 'sky'")
+        }
 
         switch path {
         case .global:
@@ -2294,13 +2334,11 @@ public final class ComputerUseService {
                     "drag_method 'sky' requires a current target window. Run get_app_state again."
                 )
             }
-            func target(_ screenPoint: CGPoint, _ windowPoint: CGPoint) -> SkyClickTarget {
-                SkyClickTarget(screenPoint: screenPoint, windowPoint: windowPoint, windowBounds: windowBounds, windowID: windowID, pid: snapshot.app.pid)
-            }
             try SkyClickDispatcher.drag(
-                from: target(eventStart, startWindowPoint),
-                to: target(eventEnd, endWindowPoint),
-                steps: InputSimulation.dragStepCount(from: eventStart, to: eventEnd)
+                through: zip(eventPoints, windowPoints).map {
+                    SkyClickTarget(screenPoint: $0, windowPoint: $1, windowBounds: windowBounds, windowID: windowID, pid: snapshot.app.pid)
+                },
+                modifiers: modifiers
             )
         }
 
@@ -2346,6 +2384,7 @@ public final class ComputerUseService {
 
     private func performExplicitMouseClick(
         method: ClickMethod,
+        modifiers: CGEventFlags,
         at point: CGPoint,
         windowPoint: CGPoint,
         button: MouseButtonKind,
@@ -2377,6 +2416,8 @@ public final class ComputerUseService {
                 windowBounds: windowBounds,
                 windowID: windowID,
                 clickCount: clickCount,
+                button: button,
+                modifiers: modifiers,
                 pid: snapshot.app.pid
             )
         case .global:

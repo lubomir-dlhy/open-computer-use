@@ -1725,33 +1725,54 @@ final class OpenComputerUseKitTests: XCTestCase {
         )
     }
 
-    func testSkyClickArgumentsRequireLeftButtonAndSingleOrDoubleClick() throws {
+    func testSkyClickArgumentsAcceptAnyButtonUpToTripleClick() throws {
         XCTAssertNoThrow(
             try validateSkyClickArguments(method: .skyClick, mouseButton: " LEFT ", clickCount: 1)
         )
         XCTAssertNoThrow(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 2)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "right", clickCount: 1)
+        )
+        XCTAssertNoThrow(
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "middle", clickCount: 3)
         )
         XCTAssertNoThrow(
             try validateSkyClickArguments(method: .appPost, mouseButton: "right", clickCount: 5)
         )
 
         XCTAssertThrowsError(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "right", clickCount: 1)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "back", clickCount: 1)
         ) { error in
             XCTAssertEqual(
                 (error as? ComputerUseError)?.errorDescription,
-                "click_method 'sky_click' only supports mouse_button 'left'"
+                "click_method 'sky_click' supports mouse_button left, right or middle"
             )
         }
         XCTAssertThrowsError(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 3)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 4)
         ) { error in
             XCTAssertEqual(
                 (error as? ComputerUseError)?.errorDescription,
-                "click_method 'sky_click' supports click_count 1 or 2"
+                "click_method 'sky_click' supports click_count 1, 2 or 3"
             )
         }
+        XCTAssertThrowsError(
+            try validateSkyClickArguments(method: .appPost, mouseButton: "left", clickCount: 1, modifiers: .maskCommand)
+        )
+    }
+
+    func testMouseModifiersParseAliasesAndRejectUnknownKeys() throws {
+        XCTAssertEqual(try parseMouseModifiers(nil), [])
+        XCTAssertEqual(try parseMouseModifiers(["Cmd", "shift"]), [.maskCommand, .maskShift])
+        XCTAssertEqual(try parseMouseModifiers(["alt", "ctrl"]), [.maskAlternate, .maskControl])
+        XCTAssertThrowsError(try parseMouseModifiers(["fn"]))
+    }
+
+    func testSkyEventTypesFollowRequestedButton() {
+        XCTAssertEqual(SkyClickEventKind.down.cgEventType(button: .right), .rightMouseDown)
+        XCTAssertEqual(SkyClickEventKind.up.cgEventType(button: .middle), .otherMouseUp)
+        XCTAssertEqual(SkyClickEventKind.dragged.cgEventType(button: .left), .leftMouseDragged)
+        XCTAssertEqual(SkyClickEventKind.moved.cgEventType(button: .right), .mouseMoved)
+        XCTAssertEqual(MouseButtonKind.right.skyButtonNumber, 1)
     }
 
     func testSkyClickRecipeIncludesMovePrimerAndTargetPairs() throws {
@@ -1770,11 +1791,11 @@ final class OpenComputerUseKitTests: XCTestCase {
     }
 
     func testSkyClickRecipeRejectsUnsupportedClickCounts() {
-        for count in [0, 3] {
+        for count in [0, 4] {
             XCTAssertThrowsError(try skyClickEventRecipe(clickCount: count)) { error in
                 XCTAssertEqual(
                     (error as? ComputerUseError)?.errorDescription,
-                    "click_method 'sky_click' supports click_count 1 or 2"
+                    "click_method 'sky_click' supports click_count 1, 2 or 3"
                 )
             }
         }
