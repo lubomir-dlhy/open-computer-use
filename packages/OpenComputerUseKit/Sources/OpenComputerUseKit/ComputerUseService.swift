@@ -268,13 +268,49 @@ enum DragDeliveryPath: String, CaseIterable {
     /// pass through the window server, so window-server drag sessions (window
     /// moves, text selection, Finder drag-and-drop) are not driven.
     case appPost = "app_post"
+    /// SkyLight pid post with target-only synthetic focus, like `sky_click`:
+    /// reaches Chromium web content without moving the system pointer.
+    case sky
     /// `.cghidEventTap`: drives window-server drag sessions and may move the
     /// real pointer or change foreground focus.
     case global
 }
 
-func dragDeliveryPath(environment: [String: String]) -> DragDeliveryPath {
-    globalPointerFallbacksEnabled(environment: environment) ? .global : .appPost
+public enum DragMethod: String, CaseIterable, Sendable {
+    case auto
+    case appPost = "app_post"
+    case sky
+    case global
+}
+
+func parseDragMethod(_ rawValue: String?) throws -> DragMethod {
+    let normalized = rawValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() ?? DragMethod.auto.rawValue
+    guard let method = DragMethod(rawValue: normalized) else {
+        let expected = DragMethod.allCases.map(\.rawValue).joined(separator: ", ")
+        throw ComputerUseError.message("Invalid drag_method '\(rawValue ?? "")'. Expected one of: \(expected)")
+    }
+    return method
+}
+
+func dragDeliveryPath(environment: [String: String], method: DragMethod = .auto) throws -> DragDeliveryPath {
+    let globalAllowed = globalPointerFallbacksEnabled(environment: environment)
+    switch method {
+    case .auto:
+        return globalAllowed ? .global : .appPost
+    case .appPost:
+        return .appPost
+    case .sky:
+        return .sky
+    case .global:
+        guard globalAllowed else {
+            throw ComputerUseError.message(
+                "drag_method 'global' requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 because it may move the system pointer and change foreground focus"
+            )
+        }
+        return .global
+    }
 }
 
 func dragDeliveryNote(for path: DragDeliveryPath) -> String {
@@ -283,6 +319,8 @@ func dragDeliveryNote(for path: DragDeliveryPath) -> String {
         return "Drag delivered via app_post: mouse events were posted directly to the target process and the system pointer did not move. This path cannot drive window-server drag sessions such as window moves, text selection, or Finder drag-and-drop. If the drag had no effect, set OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 in the server process environment to use the global pointer path, which may move the real pointer and change foreground focus."
     case .global:
         return "Drag delivered via global pointer path: OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS is enabled, so the real pointer may have moved and foreground focus may have changed."
+    case .sky:
+        return "Drag delivered via SkyLight: events were posted to the target window with target-only synthetic focus; the system pointer did not move."
     }
 }
 
@@ -882,7 +920,7 @@ public final class ComputerUseService {
         return try actionResult(for: query)
     }
 
-    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
+    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double, dragMethod: DragMethod = .auto) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
         guard snapshot.observation.includeScreenshot else {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
@@ -893,16 +931,21 @@ public final class ComputerUseService {
             return try actionResult(for: query)
         }
 
-        let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
-        let end = try screenshotToGlobalPoint(snapshot: snapshot, x: toX, y: toY)
+        let startWindowPoint = try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: CGPoint(x: fromX, y: fromY))
+        let endWindowPoint = try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: CGPoint(x: toX, y: toY))
+        let start = try windowPointToGlobalPoint(snapshot: snapshot, point: startWindowPoint)
+        let end = try windowPointToGlobalPoint(snapshot: snapshot, point: endWindowPoint)
         let path = try performDragEvent(
             from: start,
             to: end,
+            startWindowPoint: startWindowPoint,
+            endWindowPoint: endWindowPoint,
+            method: dragMethod,
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
         return appendingDragDeliveryNote(
-            to: try actionResult(for: query),
+            to: try actionResult(for: query, recoveryPolicy: path == .sky ? .readOnly : .allowActivation),
             path: path
         )
     }
@@ -2224,12 +2267,15 @@ public final class ComputerUseService {
     private func performDragEvent(
         from start: CGPoint,
         to end: CGPoint,
+        startWindowPoint: CGPoint,
+        endWindowPoint: CGPoint,
+        method: DragMethod,
         targetDescription: String,
         snapshot: AppSnapshot
     ) throws -> DragDeliveryPath {
         let eventStart = inputEventPoint(fromScreenStatePoint: start)
         let eventEnd = inputEventPoint(fromScreenStatePoint: end)
-        let path = dragDeliveryPath(environment: ProcessInfo.processInfo.environment)
+        let path = try dragDeliveryPath(environment: ProcessInfo.processInfo.environment, method: method)
 
         switch path {
         case .global:
@@ -2242,6 +2288,20 @@ public final class ComputerUseService {
             try InputSimulation.dragGlobally(from: eventStart, to: eventEnd)
         case .appPost:
             try InputSimulation.dragTargeted(from: eventStart, to: eventEnd, pid: snapshot.app.pid)
+        case .sky:
+            guard let windowBounds = snapshot.windowBounds, let windowID = snapshot.targetWindowID else {
+                throw ComputerUseError.stateUnavailable(
+                    "drag_method 'sky' requires a current target window. Run get_app_state again."
+                )
+            }
+            func target(_ screenPoint: CGPoint, _ windowPoint: CGPoint) -> SkyClickTarget {
+                SkyClickTarget(screenPoint: screenPoint, windowPoint: windowPoint, windowBounds: windowBounds, windowID: windowID, pid: snapshot.app.pid)
+            }
+            try SkyClickDispatcher.drag(
+                from: target(eventStart, startWindowPoint),
+                to: target(eventEnd, endWindowPoint),
+                steps: InputSimulation.dragStepCount(from: eventStart, to: eventEnd)
+            )
         }
 
         return path

@@ -64,6 +64,10 @@ public enum ToolDefinitions {
                     "from_y": numberProperty(description: "Start Y coordinate"),
                     "to_x": numberProperty(description: "End X coordinate"),
                     "to_y": numberProperty(description: "End Y coordinate"),
+                    "drag_method": stringProperty(
+                        description: "auto (default) keeps the gate-based choice; sky posts through SkyLight to the target window without moving the system pointer, for Chromium web content; app_post and global force those paths.",
+                        enumValues: DragMethod.allCases.map(\.rawValue)
+                    ),
                 ],
                 required: ["app", "from_x", "from_y", "to_x", "to_y"]
             )

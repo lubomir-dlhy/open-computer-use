@@ -102,7 +102,8 @@ public final class ComputerUseToolDispatcher {
                 fromX: requireDouble("from_x", in: arguments),
                 fromY: requireDouble("from_y", in: arguments),
                 toX: requireDouble("to_x", in: arguments),
-                toY: requireDouble("to_y", in: arguments)
+                toY: requireDouble("to_y", in: arguments),
+                dragMethod: try parseDragMethod(optionalString("drag_method", in: arguments))
             )
         case "type_text":
             return try service.typeText(

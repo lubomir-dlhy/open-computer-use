@@ -1585,11 +1585,22 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(InputSimulation.needsDragEventNumber(majorVersion: 27))
     }
 
-    func testDragDeliveryPathFollowsGlobalPointerGate() {
-        XCTAssertEqual(dragDeliveryPath(environment: [:]), .appPost)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]), .appPost)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]), .global)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": " True "]), .global)
+    func testDragDeliveryPathFollowsGlobalPointerGate() throws {
+        XCTAssertEqual(try dragDeliveryPath(environment: [:]), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]), .global)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": " True "]), .global)
+    }
+
+    func testExplicitDragMethodOverridesGateExceptGlobal() throws {
+        let gateOn = ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]
+        XCTAssertEqual(try dragDeliveryPath(environment: gateOn, method: .sky), .sky)
+        XCTAssertEqual(try dragDeliveryPath(environment: gateOn, method: .appPost), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: [:], method: .sky), .sky)
+        XCTAssertThrowsError(try dragDeliveryPath(environment: [:], method: .global))
+        XCTAssertEqual(try parseDragMethod(nil), .auto)
+        XCTAssertEqual(try parseDragMethod(" SKY "), .sky)
+        XCTAssertThrowsError(try parseDragMethod("sky_click"))
     }
 
     func testDragDeliveryNoteExplainsWhyDefaultPathCannotDriveWindowServerDrags() {
