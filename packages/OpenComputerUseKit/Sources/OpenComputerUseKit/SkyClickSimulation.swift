@@ -216,12 +216,9 @@ enum SkyClickDispatcher {
                     event.flags = modifiers
                 }
 
-                // The current Cua Driver Chromium recipe deliberately posts through
-                // both channels: SkyLight reaches Chromium/Catalyst while the public
-                // path preserves AppKit compatibility. This is one dispatch policy,
-                // not a retry after an observed failure.
+                // SkyLight alone reaches both Chromium and AppKit; also posting through
+                // CGEvent.postToPid delivered every event twice.
                 try spi.postToPid(event, pid: target.pid)
-                event.postToPid(target.pid)
 
                 let delay = step.delayAfter * InputTiming.skyClickDelayScale
                 if delay > 0 {
@@ -326,7 +323,6 @@ enum SkyClickDispatcher {
             }
             previousScreenPoint = screenPoint
             try spi.postToPid(event, pid: start.pid)
-            event.postToPid(start.pid)
             let delay = delayAfter * InputTiming.skyClickDelayScale
             if delay > 0 {
                 Thread.sleep(forTimeInterval: delay)

@@ -1592,6 +1592,13 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": " True "]), .global)
     }
 
+    func testForegroundActivationIsOptIn() {
+        XCTAssertFalse(foregroundActivationEnabled(environment: [:]))
+        XCTAssertFalse(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION": "0"]))
+        XCTAssertFalse(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]))
+        XCTAssertTrue(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION": " Yes "]))
+    }
+
     func testExplicitDragMethodOverridesGateExceptGlobal() throws {
         let gateOn = ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]
         XCTAssertEqual(try dragDeliveryPath(environment: gateOn, method: .sky), .sky)

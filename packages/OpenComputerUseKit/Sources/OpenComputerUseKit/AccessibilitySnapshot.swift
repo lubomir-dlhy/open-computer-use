@@ -211,6 +211,7 @@ enum SnapshotBuilder {
         var focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
         if focusedWindow == nil,
            recoveryPolicy == .allowActivation,
+           foregroundActivationEnabled(),
            recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: nil) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
@@ -232,6 +233,7 @@ enum SnapshotBuilder {
         }
         if windowCapture == nil,
            recoveryPolicy == .allowActivation,
+           foregroundActivationEnabled(),
            recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: rootWindow) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             if let recoveredWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {

@@ -373,6 +373,7 @@ enum AppDiscovery {
 
     private static func openApplication(at appURL: URL) throws {
         let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = foregroundActivationEnabled()
         let semaphore = DispatchSemaphore(value: 0)
         let errorBox = LaunchErrorBox()
 

@@ -261,6 +261,18 @@ func inputFallbackDebugEnabled(environment: [String: String]) -> Bool {
     return ["1", "true", "yes", "on"].contains(rawValue)
 }
 
+/// Activating, unhiding or raising the target puts it in front of the user's work, so it is opt-in.
+func foregroundActivationEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
 func globalPointerFallbacksEnabled(environment: [String: String]) -> Bool {
     guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1540,6 +1552,7 @@ public final class ComputerUseService {
 
         guard
             allowActivationFallback,
+            foregroundActivationEnabled(),
             !record.isSyntheticText,
             button == .left,
             let element = record.element,
