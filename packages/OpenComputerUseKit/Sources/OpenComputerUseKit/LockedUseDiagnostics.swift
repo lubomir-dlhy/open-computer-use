@@ -120,8 +120,8 @@ public struct LockedUseDiagnostics: Codable, Sendable {
             clientApproved: approved, authenticationPolicyIntact: policyIntact,
             session: .current(), accessibility: AXIsProcessTrusted(),
             screenRecording: CGPreflightScreenCaptureAccess(), inputMonitoring: CGPreflightListenEventAccess(),
-            installedPluginVersion: Bundle(url: URL(fileURLWithPath: pluginsPath + "/" + ownPlugin))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-            bundledPluginVersion: Bundle(url: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/LockedUse/OCULockAuth.bundle"))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            installedPluginVersion: bundleShortVersion(pluginsPath + "/" + ownPlugin),
+            bundledPluginVersion: bundleShortVersion(Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/LockedUse/OCULockAuth.bundle").path),
             pluginInstalled: entries.contains(ownPlugin),
             brokerInstalled: FileManager.default.fileExists(atPath: "/Library/Application Support/OpenComputerUse/LockedUse/OCULockService"),
             guardianAccessibility: guardianPermissions["accessibility"],
@@ -193,4 +193,10 @@ func requireUsableComputerUseSession(_ session: LockedUseSession = .current()) t
     case .unavailable:
         throw ComputerUseError.stateUnavailable("No completed GUI session for the current console user is available. Computer Use cannot operate a login, switched-user, or unknown session.")
     }
+}
+
+// Bundle(url:) caches per path for the process lifetime, so a long-lived agent
+// would keep reporting the version from before a reinstall.
+private func bundleShortVersion(_ bundlePath: String) -> String? {
+    NSDictionary(contentsOfFile: bundlePath + "/Contents/Info.plist")?["CFBundleShortVersionString"] as? String
 }
