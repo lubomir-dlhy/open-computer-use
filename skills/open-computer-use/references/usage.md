@@ -248,7 +248,7 @@ open-computer-use call --calls '[
 
 ## Drag Delivery
 
-`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium appears to drop the intermediate moves unless the user's real pointer is over its window, even when it is visible or parked on the agent display; then the page sees only the press and release. Native AppKit apps receive every move.
+`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium receives every move but reports `buttons: 0` on them, because it reads the system's real button state, so pages that ignore moves without a pressed button see only the press and release. Canvas apps that track the press themselves (Excalidraw) draw normally; native AppKit apps receive proper drags.
 
 ```sh
 open-computer-use call drag --args '{"app":"Google Chrome","from_x":400,"from_y":250,"to_x":880,"to_y":250,"drag_method":"sky","path":[[500,320],[640,345],[780,320]],"modifiers":["shift"]}'
@@ -269,7 +269,7 @@ Every interaction must leave the user's frontmost app, window order and pointer 
 
 - `get_app_state` and actions never activate, unhide or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) returns `cgWindowNotFound`; ask the user to show it.
 - Native context menus (AppKit menus, not menus a web page draws) do not open in a background app: a right-click reaches the app but the menu closes at once. Use the element's accessibility actions instead.
-- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks.
+- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks. Windows already captured stay pinned across turns, so covered and other-Space windows keep rendering; a Chromium window ocu has never seen unoccluded needs `window_placement: "agent_display"` once.
 - Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
 - Avoid app shortcuts that bring their own window forward. In Chrome, `cmd+l` raises the browser window; to navigate, `sky_click` the address bar, `set_value` the URL on the address field, then `press_key` `Return` with `key_method: "sky_key"`.
 - Do not set `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS` or `OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION` unless the user explicitly asks for foreground behavior.
