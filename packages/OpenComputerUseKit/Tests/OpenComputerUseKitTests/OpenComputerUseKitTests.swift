@@ -665,16 +665,23 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(instructions, computerUseServerInstructions)
     }
 
-    func testMCPTurnEndedNotificationResetsBackgroundStateWithoutResponse() {
-        var resetCount = 0
+    func testMCPTurnEndedNotificationResetsTurnStateWithoutResponse() {
+        var sessionResets = 0
+        var turnResets = 0
         let server = StdioMCPServer(
             service: ComputerUseService(),
-            backgroundStateReset: { resetCount += 1 }
+            backgroundStateReset: { sessionResets += 1 },
+            turnStateReset: { turnResets += 1 }
         )
         let response = server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"type":"agent-turn-complete"}}"#)
 
         XCTAssertNil(response)
-        XCTAssertEqual(resetCount, 1)
+        XCTAssertEqual(turnResets, 1)
+        XCTAssertEqual(sessionResets, 0)
+
+        server.endSession()
+        XCTAssertEqual(sessionResets, 1)
+        XCTAssertEqual(turnResets, 2)
     }
 
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {

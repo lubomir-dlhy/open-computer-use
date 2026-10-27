@@ -129,6 +129,12 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
 
 /// Release process-owned background window state at the host's session
 /// boundary. The exit hooks remain a final best-effort fallback.
+/// Release what one agent turn borrowed. Occlusion pins stay: the user never sees them, and
+/// releasing them would leave covered or other-Space windows stale on the agent's next turn.
+public func resetOpenComputerUseTurnState() {
+    AgentDisplay.shared.restoreAll()
+}
+
 public func resetOpenComputerUseBackgroundWindowState() {
     WindowOcclusionKeepAlive.shared.releaseAll()
     AgentDisplay.shared.restoreAll()

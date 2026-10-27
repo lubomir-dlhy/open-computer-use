@@ -21,14 +21,17 @@ public final class StdioMCPServer {
     private let service: ComputerUseService
     private let dispatcher: ComputerUseToolDispatcher
     private let backgroundStateReset: () -> Void
+    private let turnStateReset: () -> Void
 
     public init(
         service: ComputerUseService = ComputerUseService(),
-        backgroundStateReset: @escaping () -> Void = resetOpenComputerUseBackgroundWindowState
+        backgroundStateReset: @escaping () -> Void = resetOpenComputerUseBackgroundWindowState,
+        turnStateReset: @escaping () -> Void = resetOpenComputerUseTurnState
     ) {
         self.service = service
         self.dispatcher = ComputerUseToolDispatcher(service: service)
         self.backgroundStateReset = backgroundStateReset
+        self.turnStateReset = turnStateReset
     }
 
     public func run() throws {
@@ -75,7 +78,7 @@ public final class StdioMCPServer {
             case "notifications/initialized":
                 return nil
             case "notifications/turn-ended":
-                endSession()
+                endTurn()
                 return nil
             case "ping":
                 return try encodeJSONRPCResult(id: id, result: [:])
@@ -129,11 +132,16 @@ public final class StdioMCPServer {
     /// connections call this explicitly because they use `handle(line:)`
     /// instead of the stdio `run()` loop.
     public func endSession() {
+        endTurn()
+        backgroundStateReset()
+    }
+
+    private func endTurn() {
         service.clearQueryIndexes()
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()
         }
-        backgroundStateReset()
+        turnStateReset()
     }
 
     private func encodeJSONRPCResult(id: Any?, result: [String: Any]) throws -> String {

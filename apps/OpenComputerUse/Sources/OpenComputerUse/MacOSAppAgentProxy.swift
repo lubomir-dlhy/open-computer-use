@@ -194,7 +194,7 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
             queue: .main
         ) { _ in
             Task { @MainActor in
-                resetOpenComputerUseBackgroundWindowState()
+                resetOpenComputerUseTurnState()
                 resetOpenComputerUseVisualCursor()
             }
         }
