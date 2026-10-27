@@ -185,7 +185,7 @@ open-computer-use snapshot --max-tree-nodes 3000 --max-tree-depth 96 "Google Chr
 
 ## Choosing a Click Method
 
-`click_method` is optional. Omitting it uses `auto`, which preserves the platform's existing semantic-first behavior. Explicit methods never fall back to a different implementation:
+`click_method` is optional. Omitting it uses `auto`, which preserves the platform's existing semantic-first behavior; on macOS a coordinate click that no accessibility element under the point handles is posted through SkyLight, like `sky_click`. Explicit methods never fall back to a different implementation:
 
 - `accessibility`: only invoke the element's accessibility action and require `element_index`.
 - `app_post`: bypass accessibility and post a mouse event directly to the target app/window without moving the system pointer. Supported on macOS and Windows.
@@ -269,7 +269,7 @@ Every interaction must leave the user's frontmost app, window order and pointer 
 
 - `get_app_state` and actions never activate, unhide or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) returns `cgWindowNotFound`; ask the user to show it.
 - Native context menus (AppKit menus, not menus a web page draws) do not open in a background app: a right-click reaches the app but the menu closes at once. Use the element's accessibility actions instead.
-- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks. Windows already captured stay pinned across turns, so covered and other-Space windows keep rendering; a Chromium window ocu has never seen unoccluded needs `window_placement: "agent_display"` once.
+- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks. Each agent session's turn end and disconnect only affect the windows that session parked or pinned, even with several sessions open. Windows already captured stay pinned across turns, so covered and other-Space windows keep rendering; a Chromium window ocu has never seen unoccluded needs `window_placement: "agent_display"` once.
 - Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
 - Avoid app shortcuts that bring their own window forward. In Chrome, `cmd+l` raises the browser window; to navigate, `sky_click` the address bar, `set_value` the URL on the address field, then `press_key` `Return` with `key_method: "sky_key"`.
 - Do not set `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS` or `OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION` unless the user explicitly asks for foreground behavior.
