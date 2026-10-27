@@ -117,6 +117,12 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
     private static let copySpacesForWindowsSymbol = "SLSCopySpacesForWindows"
     private static let copyManagedDisplaySpacesSymbol = "SLSCopyManagedDisplaySpaces"
     private static let axElementGetWindowSymbol = "_AXUIElementGetWindow"
+    // Remote tokens address an app's AX elements by id, which also reaches
+    // windows on other Spaces that kAXWindows omits until they were focused
+    // (AltTab's approach). Token layout: pid, 0, 'coco', element id.
+    private static let axElementCreateWithRemoteTokenSymbol = "_AXUIElementCreateWithRemoteToken"
+    private static let remoteTokenElementIDLimit: UInt64 = 2_000
+    private static let remoteTokenScanBudget: TimeInterval = 0.4
     // WindowServer reads the window's backing store on the GPU: works for
     // covered windows and for windows on inactive (fullscreen) Spaces where
     // ScreenCaptureKit fails, in ~10-40ms. The wrapper is the 4-argument form
@@ -140,6 +146,7 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
     private typealias CopySpacesForWindowsFunction = @convention(c) (UInt32, Int32, CFArray) -> Unmanaged<CFArray>?
     private typealias CopyManagedDisplaySpacesFunction = @convention(c) (UInt32) -> Unmanaged<CFArray>?
     private typealias AXElementGetWindowFunction = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+    private typealias AXElementCreateWithRemoteTokenFunction = @convention(c) (CFData) -> Unmanaged<AXUIElement>?
     private typealias HardwareCaptureWindowListFunction = @convention(c) (UInt32, UnsafePointer<CGWindowID>, Int32, UInt32) -> Unmanaged<CFArray>?
 
     private let frameworkHandle: UnsafeMutableRawPointer?
@@ -154,6 +161,7 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
     private let copySpacesForWindowsFunction: CopySpacesForWindowsFunction?
     private let copyManagedDisplaySpacesFunction: CopyManagedDisplaySpacesFunction?
     private let axElementGetWindowFunction: AXElementGetWindowFunction?
+    private let axElementCreateWithRemoteTokenFunction: AXElementCreateWithRemoteTokenFunction?
     private let hardwareCaptureWindowListFunction: HardwareCaptureWindowListFunction?
 
     let capability: SkyLightSPICapability
@@ -176,6 +184,7 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
         copySpacesForWindowsFunction = Self.resolve(handle: handle, symbol: Self.copySpacesForWindowsSymbol)
         copyManagedDisplaySpacesFunction = Self.resolve(handle: handle, symbol: Self.copyManagedDisplaySpacesSymbol)
         axElementGetWindowFunction = Self.resolve(handle: appServicesHandle, symbol: Self.axElementGetWindowSymbol)
+        axElementCreateWithRemoteTokenFunction = Self.resolve(handle: appServicesHandle, symbol: Self.axElementCreateWithRemoteTokenSymbol)
         hardwareCaptureWindowListFunction = Self.resolve(handle: handle, symbol: Self.hardwareCaptureWindowListSymbol)
 
         var missingSymbols: [String] = []
@@ -248,6 +257,35 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
         var windowID: CGWindowID = 0
         guard axElementGetWindowFunction(element, &windowID) == .success, windowID != 0 else { return nil }
         return windowID
+    }
+
+    /// Every AX window of `pid` with a CGWindowID, including windows on other
+    /// Spaces that kAXWindows does not list. Empty when the symbol is absent.
+    func remoteWindowElements(pid: pid_t) -> [(windowID: CGWindowID, element: AXUIElement)] {
+        guard let axElementCreateWithRemoteTokenFunction else { return [] }
+        let deadline = ProcessInfo.processInfo.systemUptime + Self.remoteTokenScanBudget
+        var token = Data(count: 20)
+        token.withUnsafeMutableBytes { bytes in
+            bytes.storeBytes(of: Int32(pid), toByteOffset: 0, as: Int32.self)
+            bytes.storeBytes(of: Int32(0), toByteOffset: 4, as: Int32.self)
+            bytes.storeBytes(of: Int32(0x636f_636f), toByteOffset: 8, as: Int32.self)
+        }
+        var seen = Set<CGWindowID>()
+        var windows: [(windowID: CGWindowID, element: AXUIElement)] = []
+        for elementID in 0..<Self.remoteTokenElementIDLimit {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
+            token.withUnsafeMutableBytes { $0.storeBytes(of: elementID, toByteOffset: 12, as: UInt64.self) }
+            guard let element = axElementCreateWithRemoteTokenFunction(token as CFData)?.takeRetainedValue() else { continue }
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            var role: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+                  role as? String == kAXWindowRole as String,
+                  let windowID = windowID(for: element),
+                  seen.insert(windowID).inserted
+            else { continue }
+            windows.append((windowID, element))
+        }
+        return windows
     }
 
     /// Enable or disable WindowServer occlusion notifications for one window of

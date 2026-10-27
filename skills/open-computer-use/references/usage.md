@@ -244,6 +244,8 @@ open-computer-use call --calls '[
 
 `agent_display` moves the window's frame onto a virtual display the user never sees (macOS only): the app renders it, exposes its full tree and accepts `sky_click` / `sky_key`, while the user's Space, focus and pointer stay untouched. The window is gone from the user's desktop until `restore`, the assistant turn ends, the MCP/REPL connection closes, or the runtime exits, so treat it as a deliberate, temporary step. `restore` restores every window parked by the runtime for that app. Keep park/action/restore calls in one `js`, REPL, MCP, or `call --calls` session; a one-shot CLI connection restores its background state when it closes. `sky_click` and `sky_key` accept covered and other-Space windows.
 
+Apps stop listing a window in `AXWindows` once it is on another Space. On macOS, `query` with a `window_id` (and `get_app_state` when the app reports no usable focused window) still finds such a window if the app ever exposed it to accessibility, by addressing its elements directly. A window that has never been on the user's current Space since the app launched has no accessibility element yet and stays unreachable; ask the user to show it once.
+
 `sky_key` types into whatever element the target window has focused, so click or AX-focus the field first. It fails closed for hidden apps (`cmd+h`), stale window ids, and missing private symbols; Windows and Linux return an unsupported error.
 
 ## Drag Delivery

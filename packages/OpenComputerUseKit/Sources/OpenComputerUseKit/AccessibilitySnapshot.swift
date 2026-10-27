@@ -448,7 +448,27 @@ enum SnapshotBuilder {
                 ?? firstWindow(for: appElement)
         }
 
-        return usableWindowElement(from: copyElement(appElement, attribute: kAXFocusedWindowAttribute)) ?? firstWindow(for: appElement)
+        return usableWindowElement(from: copyElement(appElement, attribute: kAXFocusedWindowAttribute))
+            ?? firstWindow(for: appElement)
+            ?? firstRemoteWindow(pid: appPID)
+    }
+
+    /// A standard window kAXWindows omits, e.g. one on a full-screen Space that
+    /// was never focused. Picks the frontmost in CG window order.
+    private static func firstRemoteWindow(pid: pid_t) -> AXUIElement? {
+        let candidates = SkyLightSPI.shared.remoteWindowElements(pid: pid).filter {
+            isUsableWindowElement($0.element)
+                && stringValue(of: $0.element, attribute: kAXSubroleAttribute) == kAXStandardWindowSubrole as String
+        }
+        guard candidates.count > 1,
+              let order = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return candidates.first?.element
+        }
+        let rank = Dictionary(order.enumerated().compactMap { offset, info in
+            (info[kCGWindowNumber as String] as? NSNumber).map { ($0.uint32Value, offset) }
+        }, uniquingKeysWith: min)
+        return candidates.min { rank[$0.windowID, default: .max] < rank[$1.windowID, default: .max] }?.element
     }
 
     private static func usableWindowElement(from element: AXUIElement?) -> AXUIElement? {
@@ -2438,7 +2458,7 @@ extension SnapshotBuilder {
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
         copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
             SkyLightSPI.shared.windowID(for: $0) == windowID
-        }
+        } ?? SkyLightSPI.shared.remoteWindowElements(pid: pid(of: appElement)).first { $0.windowID == windowID }?.element
     }
 
     // Attributes read for every visited node, in one batched IPC call. Position
