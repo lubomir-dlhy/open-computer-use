@@ -460,7 +460,7 @@ private final class AppAgentConnection: @unchecked Sendable {
                     let command = try parseOpenComputerUseCLI(arguments: arguments)
                     switch command {
                     case .snapshot, .call:
-                        return try lockedUse.perform { runCLI(arguments: arguments) }
+                        return try lockedUse.perform { withOpenComputerUseSession(server.sessionID) { runCLI(arguments: arguments) } }
                     default: return runCLI(arguments: arguments)
                     }
                 }

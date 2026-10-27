@@ -4,12 +4,13 @@ import Foundation
 /// The MCP session borrowing window state. One app agent serves every host session,
 /// so parked windows and occlusion pins are released per owner.
 enum SessionOwner {
+    // Per thread: the app agent serves concurrent connections on separate threads.
+    private static let key = "ocu.session-owner"
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var value = 0
     nonisolated(unsafe) private static var lastID = 0
 
     static var current: Int {
-        lock.withLock { value }
+        Thread.current.threadDictionary[key] as? Int ?? 0
     }
 
     static func makeID() -> Int {
@@ -20,13 +21,16 @@ enum SessionOwner {
     }
 
     static func with<T>(_ owner: Int, _ body: () throws -> T) rethrows -> T {
-        let previous = lock.withLock {
-            defer { value = owner }
-            return value
-        }
-        defer { lock.withLock { value = previous } }
+        let previous = Thread.current.threadDictionary[key]
+        Thread.current.threadDictionary[key] = owner
+        defer { Thread.current.threadDictionary[key] = previous }
         return try body()
     }
+}
+
+/// Run `body` with window state it borrows attributed to `session`.
+public func withOpenComputerUseSession<T>(_ session: Int, _ body: () throws -> T) rethrows -> T {
+    try SessionOwner.with(session, body)
 }
 
 /// `pid` followed by its ancestors, up to launchd.
