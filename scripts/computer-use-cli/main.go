@@ -21,7 +21,7 @@ import (
 
 const (
 	cliName                  = "computer-use-cli"
-	cliVersion               = "1.1.3-sky.7"
+	cliVersion               = "1.1.3-sky.8"
 	defaultTimeout           = 60 * time.Second
 	pluginRootEnvVar         = "COMPUTER_USE_PLUGIN_ROOT"
 	pluginVersionEnvVar      = "COMPUTER_USE_PLUGIN_VERSION"
