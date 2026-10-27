@@ -71,6 +71,7 @@ final class AgentDisplay: @unchecked Sendable {
         let element: AXUIElement
         let originalPosition: CGPoint
         var wasMinimized = false
+        var owner = 0
     }
 
     private let lock = NSLock()
@@ -133,7 +134,7 @@ final class AgentDisplay: @unchecked Sendable {
                 throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not un-minimize the window")
             }
         }
-        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position, wasMinimized: unminimize)
+        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position, wasMinimized: unminimize, owner: SessionOwner.current)
         installExitHookIfNeeded()
         waitForWindow(windowID, toLandOn: displaySpaceIDs, or: bounds)
         TimingLog.log("agent_display.park", since: start)
@@ -249,9 +250,10 @@ final class AgentDisplay: @unchecked Sendable {
         return false
     }
 
-    func restoreAll() {
+    /// Restore every parked window, or only those `owner` parked.
+    func restoreAll(owner: Int? = nil) {
         lock.lock()
-        let windowIDs = Array(parked.keys)
+        let windowIDs = parked.filter { owner == nil || $0.value.owner == owner }.map(\.key)
         lock.unlock()
         for windowID in windowIDs {
             try? restore(windowID: windowID)

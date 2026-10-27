@@ -192,9 +192,12 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
             forName: openComputerUseTurnEndedNotificationName,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { notification in
+            let sender = decodeProcessAncestry(notification.object as? String)
             Task { @MainActor in
-                resetOpenComputerUseTurnState()
+                for session in turnEndedRecipients(senderAncestry: sender, sessionAncestries: AppAgentSessions.ancestries) {
+                    resetOpenComputerUseTurnState(session: session)
+                }
                 resetOpenComputerUseVisualCursor()
             }
         }
@@ -324,6 +327,7 @@ private final class AppAgentConnection: @unchecked Sendable {
             close(fileDescriptor)
             return
         }
+        AppAgentSessions.register(server.sessionID, peer: fileDescriptor)
         let monitorQueue = DispatchQueue(label: "ocu.client-disconnect")
         let monitor = DispatchSource.makeTimerSource(queue: monitorQueue)
         monitor.schedule(deadline: .now(), repeating: .milliseconds(100))
@@ -341,6 +345,7 @@ private final class AppAgentConnection: @unchecked Sendable {
             lockedUse.end(disconnecting: true)
             if let probe = keychainProbe { keychainProbe = nil; LockedUseDeferredCleanup.shared.retainIfNeeded(probe) }
             server.endSession()
+            AppAgentSessions.unregister(server.sessionID)
             fclose(file)
         }
 
@@ -543,6 +548,27 @@ private final class AppAgentConnection: @unchecked Sendable {
             let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
             return CLIProxyResponse(stdout: "", stderr: message + "\n", exitCode: EXIT_FAILURE)
         }
+    }
+}
+
+/// Process ancestry of each connected proxy, used to route a turn-ended signal to its own host.
+private enum AppAgentSessions {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var entries: [Int: [pid_t]] = [:]
+
+    static var ancestries: [Int: [pid_t]] {
+        lock.withLock { entries }
+    }
+
+    static func register(_ session: Int, peer socket: Int32) {
+        var pid: pid_t = 0
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        let chain = getsockopt(socket, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0 ? processAncestry(of: pid) : []
+        lock.withLock { entries[session] = chain }
+    }
+
+    static func unregister(_ session: Int) {
+        _ = lock.withLock { entries.removeValue(forKey: session) }
     }
 }
 

@@ -60,6 +60,7 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
     /// Preserve the state reported by the SPI so cleanup does not enable
     /// notifications that another owner had already disabled.
     private var frozenWindowPreviousStates: [CGWindowID: Bool] = [:]
+    private var owners: [CGWindowID: Set<Int>] = [:]
     private var exitHookInstalled = false
 
     /// Returns `true` when the window's visible state is pinned (now or already).
@@ -79,6 +80,7 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
         }
 
         if frozenWindowPreviousStates[windowID] != nil {
+            owners[windowID, default: []].insert(SessionOwner.current)
             return true
         }
         guard windowLooksUnoccluded(bounds: bounds, coveringBounds: coveringWindowBounds(above: windowID)) else {
@@ -87,6 +89,7 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
         do {
             let previousState = try spi.setWindowOcclusionNotificationsEnabled(false, windowID: windowID)
             frozenWindowPreviousStates[windowID] = previousState
+            owners[windowID] = [SessionOwner.current]
         } catch {
             return false
         }
@@ -102,13 +105,21 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
         return frozenWindowPreviousStates[windowID] != nil
     }
 
-    func releaseAll(spi: any WindowOcclusionControlling = SkyLightSPI.shared) {
+    /// Release every pin, or drop `owner` and release the pins no other session still uses.
+    func releaseAll(owner: Int? = nil, spi: any WindowOcclusionControlling = SkyLightSPI.shared) {
         lock.lock()
         defer { lock.unlock() }
         for (windowID, previousState) in Array(frozenWindowPreviousStates) {
+            if let owner {
+                owners[windowID]?.remove(owner)
+                guard owners[windowID]?.isEmpty ?? true else {
+                    continue
+                }
+            }
             do {
                 try spi.setWindowOcclusionNotificationsEnabled(previousState, windowID: windowID)
                 frozenWindowPreviousStates.removeValue(forKey: windowID)
+                owners.removeValue(forKey: windowID)
             } catch {
                 // Retain failed entries so a later cleanup can retry.
             }
@@ -127,15 +138,15 @@ final class WindowOcclusionKeepAlive: @unchecked Sendable {
 
 }
 
-/// Release process-owned background window state at the host's session
-/// boundary. The exit hooks remain a final best-effort fallback.
-/// Release what one agent turn borrowed. Occlusion pins stay: the user never sees them, and
+/// Release what one agent turn borrowed (all sessions' when `session` is nil). Occlusion pins stay: the user never sees them, and
 /// releasing them would leave covered or other-Space windows stale on the agent's next turn.
-public func resetOpenComputerUseTurnState() {
-    AgentDisplay.shared.restoreAll()
+public func resetOpenComputerUseTurnState(session: Int? = nil) {
+    AgentDisplay.shared.restoreAll(owner: session)
 }
 
-public func resetOpenComputerUseBackgroundWindowState() {
-    WindowOcclusionKeepAlive.shared.releaseAll()
-    AgentDisplay.shared.restoreAll()
+/// Release background window state at a session boundary (all sessions' when `session` is nil).
+/// The exit hooks remain a final best-effort fallback.
+public func resetOpenComputerUseBackgroundWindowState(session: Int? = nil) {
+    WindowOcclusionKeepAlive.shared.releaseAll(owner: session)
+    AgentDisplay.shared.restoreAll(owner: session)
 }

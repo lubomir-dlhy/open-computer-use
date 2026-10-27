@@ -668,10 +668,11 @@ final class OpenComputerUseKitTests: XCTestCase {
     func testMCPTurnEndedNotificationResetsTurnStateWithoutResponse() {
         var sessionResets = 0
         var turnResets = 0
+        var sessions: Set<Int> = []
         let server = StdioMCPServer(
             service: ComputerUseService(),
-            backgroundStateReset: { sessionResets += 1 },
-            turnStateReset: { turnResets += 1 }
+            backgroundStateReset: { sessionResets += 1; sessions.insert($0) },
+            turnStateReset: { turnResets += 1; sessions.insert($0) }
         )
         let response = server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"type":"agent-turn-complete"}}"#)
 
@@ -682,6 +683,19 @@ final class OpenComputerUseKitTests: XCTestCase {
         server.endSession()
         XCTAssertEqual(sessionResets, 1)
         XCTAssertEqual(turnResets, 2)
+        XCTAssertEqual(sessions, [server.sessionID])
+        XCTAssertNotEqual(StdioMCPServer().sessionID, server.sessionID)
+    }
+
+    func testTurnEndedReachesOnlyTheSendersOwnHost() {
+        // Two hosts under one app: each proxy runs as host → node shim → proxy.
+        let sessions: [Int: [pid_t]] = [1: [300, 200, 100, 1], 2: [310, 210, 100, 1]]
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [400, 390, 200, 100, 1], sessionAncestries: sessions), [1])
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [500, 50, 1], sessionAncestries: sessions), [1, 2])
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [], sessionAncestries: sessions), [1, 2])
+        XCTAssertEqual(decodeProcessAncestry(encodeProcessAncestry([12, 3, 1])), [12, 3, 1])
+        XCTAssertEqual(processAncestry().first, getpid())
+        XCTAssertEqual(processAncestry().last, 1)
     }
 
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
@@ -2036,6 +2050,35 @@ final class OpenComputerUseKitTests: XCTestCase {
         keepAlive.releaseAll(spi: spi)
         XCTAssertFalse(keepAlive.isPinned(windowID: 101))
         XCTAssertEqual(spi.states[101], true)
+    }
+
+    func testOcclusionPinsStayWhileAnotherSessionUsesThem() {
+        final class FakeOcclusionSPI: WindowOcclusionControlling {
+            let occlusionCapability = SkyLightSPICapability(missingSymbols: [], feature: "occlusion")
+            var states: [CGWindowID: Bool] = [:]
+
+            func setWindowOcclusionNotificationsEnabled(_ enabled: Bool, windowID: CGWindowID) throws -> Bool {
+                defer { states[windowID] = enabled }
+                return states[windowID] ?? true
+            }
+        }
+
+        let keepAlive = WindowOcclusionKeepAlive()
+        let spi = FakeOcclusionSPI()
+        let bounds = CGRect(x: 10, y: 10, width: 100, height: 100)
+        SessionOwner.with(1) {
+            _ = keepAlive.keepVisible(windowID: 201, bounds: bounds, spi: spi)
+            _ = keepAlive.keepVisible(windowID: 202, bounds: bounds, spi: spi)
+        }
+        SessionOwner.with(2) { _ = keepAlive.keepVisible(windowID: 201, bounds: bounds, spi: spi) }
+
+        keepAlive.releaseAll(owner: 1, spi: spi)
+        XCTAssertTrue(keepAlive.isPinned(windowID: 201))
+        XCTAssertFalse(keepAlive.isPinned(windowID: 202))
+
+        keepAlive.releaseAll(owner: 2, spi: spi)
+        XCTAssertFalse(keepAlive.isPinned(windowID: 201))
+        XCTAssertEqual(spi.states[201], true)
     }
 
     func testKeyMethodParsingAndPolicy() throws {

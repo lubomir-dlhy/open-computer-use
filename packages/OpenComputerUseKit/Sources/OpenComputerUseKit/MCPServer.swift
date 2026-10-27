@@ -20,13 +20,14 @@ Ask the user before taking destructive or externally visible actions such as sen
 public final class StdioMCPServer {
     private let service: ComputerUseService
     private let dispatcher: ComputerUseToolDispatcher
-    private let backgroundStateReset: () -> Void
-    private let turnStateReset: () -> Void
+    private let backgroundStateReset: (Int) -> Void
+    private let turnStateReset: (Int) -> Void
+    public let sessionID = SessionOwner.makeID()
 
     public init(
         service: ComputerUseService = ComputerUseService(),
-        backgroundStateReset: @escaping () -> Void = resetOpenComputerUseBackgroundWindowState,
-        turnStateReset: @escaping () -> Void = resetOpenComputerUseTurnState
+        backgroundStateReset: @escaping (Int) -> Void = { resetOpenComputerUseBackgroundWindowState(session: $0) },
+        turnStateReset: @escaping (Int) -> Void = { resetOpenComputerUseTurnState(session: $0) }
     ) {
         self.service = service
         self.dispatcher = ComputerUseToolDispatcher(service: service)
@@ -48,6 +49,10 @@ public final class StdioMCPServer {
     }
 
     public func handle(line: String) -> String? {
+        SessionOwner.with(sessionID) { handleInSession(line: line) }
+    }
+
+    private func handleInSession(line: String) -> String? {
         do {
             guard let payload = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else {
                 return try encodeJSONRPCError(id: nil, code: -32700, message: "Invalid JSON-RPC payload")
@@ -133,7 +138,7 @@ public final class StdioMCPServer {
     /// instead of the stdio `run()` loop.
     public func endSession() {
         endTurn()
-        backgroundStateReset()
+        backgroundStateReset(sessionID)
     }
 
     private func endTurn() {
@@ -141,7 +146,7 @@ public final class StdioMCPServer {
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()
         }
-        turnStateReset()
+        turnStateReset(sessionID)
     }
 
     private func encodeJSONRPCResult(id: Any?, result: [String: Any]) throws -> String {

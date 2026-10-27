@@ -137,7 +137,7 @@ public let openComputerUseTurnEndedNotificationName = Notification.Name("com.ifu
 public func postOpenComputerUseTurnEndedNotification() {
     DistributedNotificationCenter.default().postNotificationName(
         openComputerUseTurnEndedNotificationName,
-        object: nil,
+        object: encodeProcessAncestry(processAncestry()),
         userInfo: nil,
         deliverImmediately: true
     )
