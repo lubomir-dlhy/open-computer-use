@@ -854,7 +854,8 @@ public final class ComputerUseService {
                             button: button,
                             clickCount: clickCount,
                             includeNearbyHitTesting: false,
-                            allowActivationFallback: false
+                            allowActivationFallback: false,
+                            clickPoint: point
                         ) {
                             handled = true
                             break
@@ -862,13 +863,28 @@ public final class ComputerUseService {
                     }
 
                     if !handled {
-                        try performNonAXClickFallback(
-                            at: targetPoint,
-                            button: button,
-                            clickCount: clickCount,
-                            targetDescription: "x=\(Int(screenshotPoint.x)) y=\(Int(screenshotPoint.y))",
-                            snapshot: snapshot
-                        )
+                        let targetDescription = "x=\(Int(screenshotPoint.x)) y=\(Int(screenshotPoint.y))"
+                        do {
+                            // Background AppKit windows ignore plain pid-posted clicks; SkyLight reaches them.
+                            try performExplicitMouseClick(
+                                method: .skyClick,
+                                modifiers: modifiers,
+                                at: targetPoint,
+                                windowPoint: point,
+                                button: button,
+                                clickCount: clickCount,
+                                targetDescription: targetDescription,
+                                snapshot: snapshot
+                            )
+                        } catch {
+                            try performNonAXClickFallback(
+                                at: targetPoint,
+                                button: button,
+                                clickCount: clickCount,
+                                targetDescription: targetDescription,
+                                snapshot: snapshot
+                            )
+                        }
                     }
                 case .accessibility:
                     throw ComputerUseError.message("click_method 'accessibility' requires element_index")
@@ -1519,7 +1535,8 @@ public final class ComputerUseService {
         button: MouseButtonKind,
         clickCount: Int,
         includeNearbyHitTesting: Bool,
-        allowActivationFallback: Bool
+        allowActivationFallback: Bool,
+        clickPoint: CGPoint? = nil
     ) throws -> Bool {
         let preferContainingWebRowAXClick = shouldPreferContainingWebRowAXClick(record, in: snapshot)
         debugClickDecision("record=\(clickDebugDescription(record)) preferContainingWebRowAXClick=\(preferContainingWebRowAXClick)")
@@ -1538,7 +1555,9 @@ public final class ComputerUseService {
                 return true
             }
 
-            for candidate in descendantClickCandidates(for: record, snapshot: snapshot) {
+            // A click on a window's blank area must not fall through to its close or minimize button.
+            for candidate in descendantClickCandidates(for: record, snapshot: snapshot)
+            where clickPoint.map({ candidate.localFrame?.contains($0) ?? false }) ?? true {
                 if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                     debugClickDecision("handled by descendant \(clickDebugDescription(candidate))")
                     pauseBeforeReadBack(0.15)
