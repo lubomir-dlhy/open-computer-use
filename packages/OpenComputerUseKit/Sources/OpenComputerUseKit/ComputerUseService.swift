@@ -1332,7 +1332,8 @@ public final class ComputerUseService {
     }
 
     @discardableResult
-    /// A minimized window is un-minimized on the agent display instead of in front of the user.
+    /// A minimized window is un-minimized, and a hidden app unhidden, on the
+    /// agent display instead of in front of the user.
     private func snapshotParkingMinimizedWindow(
         for query: String,
         textLimit: SnapshotTextLimit,
@@ -1340,6 +1341,12 @@ public final class ComputerUseService {
         recoveryPolicy: SnapshotRecoveryPolicy,
         observation: SnapshotObservationOptions
     ) throws -> AppSnapshot {
+        // A hidden app's tree is readable, but its screenshot is blank and
+        // coordinate clicks never reach it.
+        if !foregroundActivationEnabled(), AgentDisplay.shared.isSupported,
+           let app = try? AppDiscovery.resolve(query), app.name != FixtureBridge.appName {
+            _ = try AgentDisplay.shared.parkHiddenApp(pid: app.pid)
+        }
         do {
             return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: recoveryPolicy, observation: observation)
         } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {

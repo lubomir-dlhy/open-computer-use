@@ -246,7 +246,7 @@ open-computer-use call --calls '[
 
 Apps stop listing a window in `AXWindows` once it is on another Space. On macOS, `query` with a `window_id` (and `get_app_state` when the app reports no usable focused window) still finds such a window if the app ever exposed it to accessibility, by addressing its elements directly. A window that has never been on the user's current Space since the app launched has no accessibility element yet and stays unreachable; ask the user to show it once.
 
-`sky_key` types into whatever element the target window has focused, so click or AX-focus the field first. It fails closed for hidden apps (`cmd+h`), stale window ids, and missing private symbols; Windows and Linux return an unsupported error.
+`sky_key` types into whatever element the target window has focused, so click or AX-focus the field first. It fails closed for hidden apps (`cmd+h`; run `get_app_state` first, which unhides them on the agent display), stale window ids, and missing private symbols; Windows and Linux return an unsupported error.
 
 ## Drag Delivery
 
@@ -269,7 +269,7 @@ When the gate is not enabled, treat window-server drags as unavailable and reach
 
 Every interaction must leave the user's frontmost app, window order and pointer untouched:
 
-- `get_app_state` and actions never activate, unhide or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) returns `cgWindowNotFound`; ask the user to show it.
+- `get_app_state` and actions never activate or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) is handled the same way: its windows move onto the agent display, then the app is unhidden without activation, and restore hides it again before moving them back (unless the user switched to it meanwhile).
 - Native context menus (AppKit menus, not menus a web page draws) do not open in a background app: a right-click reaches the app but the menu closes at once. Use the element's accessibility actions instead.
 - Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks. Each agent session's turn end and disconnect only affect the windows that session parked or pinned, even with several sessions open. Windows already captured stay pinned across turns, so covered and other-Space windows keep rendering; a Chromium window ocu has never seen unoccluded needs `window_placement: "agent_display"` once.
 - Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
