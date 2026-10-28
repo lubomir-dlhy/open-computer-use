@@ -20,15 +20,19 @@ Ask the user before taking destructive or externally visible actions such as sen
 public final class StdioMCPServer {
     private let service: ComputerUseService
     private let dispatcher: ComputerUseToolDispatcher
-    private let backgroundStateReset: () -> Void
+    private let backgroundStateReset: (Int) -> Void
+    private let turnStateReset: (Int) -> Void
+    public let sessionID = SessionOwner.makeID()
 
     public init(
         service: ComputerUseService = ComputerUseService(),
-        backgroundStateReset: @escaping () -> Void = resetOpenComputerUseBackgroundWindowState
+        backgroundStateReset: @escaping (Int) -> Void = { resetOpenComputerUseBackgroundWindowState(session: $0) },
+        turnStateReset: @escaping (Int) -> Void = { resetOpenComputerUseTurnState(session: $0) }
     ) {
         self.service = service
         self.dispatcher = ComputerUseToolDispatcher(service: service)
         self.backgroundStateReset = backgroundStateReset
+        self.turnStateReset = turnStateReset
     }
 
     public func run() throws {
@@ -45,6 +49,10 @@ public final class StdioMCPServer {
     }
 
     public func handle(line: String) -> String? {
+        SessionOwner.with(sessionID) { handleInSession(line: line) }
+    }
+
+    private func handleInSession(line: String) -> String? {
         do {
             guard let payload = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else {
                 return try encodeJSONRPCError(id: nil, code: -32700, message: "Invalid JSON-RPC payload")
@@ -75,7 +83,7 @@ public final class StdioMCPServer {
             case "notifications/initialized":
                 return nil
             case "notifications/turn-ended":
-                endSession()
+                endTurn()
                 return nil
             case "ping":
                 return try encodeJSONRPCResult(id: id, result: [:])
@@ -129,11 +137,16 @@ public final class StdioMCPServer {
     /// connections call this explicitly because they use `handle(line:)`
     /// instead of the stdio `run()` loop.
     public func endSession() {
+        endTurn()
+        backgroundStateReset(sessionID)
+    }
+
+    private func endTurn() {
         service.clearQueryIndexes()
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()
         }
-        backgroundStateReset()
+        turnStateReset(sessionID)
     }
 
     private func encodeJSONRPCResult(id: Any?, result: [String: Any]) throws -> String {

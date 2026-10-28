@@ -185,11 +185,11 @@ open-computer-use snapshot --max-tree-nodes 3000 --max-tree-depth 96 "Google Chr
 
 ## Choosing a Click Method
 
-`click_method` is optional. Omitting it uses `auto`, which preserves the platform's existing semantic-first behavior. Explicit methods never fall back to a different implementation:
+`click_method` is optional. Omitting it uses `auto`, which preserves the platform's existing semantic-first behavior; on macOS a coordinate click that no accessibility element under the point handles is posted through SkyLight, like `sky_click`. Explicit methods never fall back to a different implementation:
 
 - `accessibility`: only invoke the element's accessibility action and require `element_index`.
 - `app_post`: bypass accessibility and post a mouse event directly to the target app/window without moving the system pointer. Supported on macOS and Windows.
-- `sky_click`: use the macOS private SkyLight background-window path with target-only synthetic focus and a Chromium primer click. It supports left single/double click on a current, on-screen window in the same Space and does not move the system pointer, deactivate the foreground app, change its key/first-responder state, or raise the target window. Its action-result snapshot refresh is read-only. Supported on macOS only.
+- `sky_click`: use the macOS private SkyLight background-window path with target-only synthetic focus and a Chromium primer click. It supports `mouse_button` left, right or middle, `click_count` 1 to 3, and `modifiers` (`cmd`, `shift`, `option`, `control`) on a current, on-screen window in the same Space and does not move the system pointer, deactivate the foreground app, change its key/first-responder state, or raise the target window. Its action-result snapshot refresh is read-only. Supported on macOS only.
 - `global`: bypass accessibility and use the desktop's global pointer path. Supported on macOS, Windows and Linux, and requires `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` because it may move the real pointer or change foreground focus.
 
 Use `app_post` for an exact blank-area or overlay click that must not be redirected to an accessibility descendant:
@@ -244,18 +244,37 @@ open-computer-use call --calls '[
 
 `agent_display` moves the window's frame onto a virtual display the user never sees (macOS only): the app renders it, exposes its full tree and accepts `sky_click` / `sky_key`, while the user's Space, focus and pointer stay untouched. The window is gone from the user's desktop until `restore`, the assistant turn ends, the MCP/REPL connection closes, or the runtime exits, so treat it as a deliberate, temporary step. `restore` restores every window parked by the runtime for that app. Keep park/action/restore calls in one `js`, REPL, MCP, or `call --calls` session; a one-shot CLI connection restores its background state when it closes. `sky_click` and `sky_key` accept covered and other-Space windows.
 
-`sky_key` types into whatever element the target window has focused, so click or AX-focus the field first. It fails closed for hidden apps (`cmd+h`), stale window ids, and missing private symbols; Windows and Linux return an unsupported error.
+Apps stop listing a window in `AXWindows` once it is on another Space. On macOS, `query` with a `window_id` (and `get_app_state` when the app reports no usable focused window) still finds such a window if the app ever exposed it to accessibility, by addressing its elements directly. A window that has never been on the user's current Space since the app launched has no accessibility element yet and stays unreachable; ask the user to show it once.
+
+`sky_key` types into whatever element the target window has focused, so click or AX-focus the field first. It fails closed for hidden apps (`cmd+h`; run `get_app_state` first, which unhides them on the agent display), stale window ids, and missing private symbols; Windows and Linux return an unsupported error.
 
 ## Drag Delivery
 
-`drag` has no method parameter. On macOS the path it takes is decided by the same process-level gate that authorizes `click_method: "global"`:
+`drag_method` is optional. `sky` posts the drag through the same SkyLight background-window path as `sky_click`: the system pointer does not move and focus is unchanged. It is the only method that accepts `path` (intermediate `[x, y]` screenshot points, for curves and freehand strokes) and `modifiers`. Chromium receives every move but reports `buttons: 0` on them, because it reads the system's real button state, so pages that ignore moves without a pressed button see only the press and release. Canvas apps that track the press themselves (Excalidraw) draw normally; native AppKit apps receive proper drags. This cannot be fixed in the background: `buttons` comes from `[NSEvent pressedMouseButtons]`, which only a real button press changes. When a page ignores such a drag, use its keyboard or value equivalent instead (arrow keys on a focused slider, `set_value`, a reorder menu), and tell the user if none exists.
+
+```sh
+open-computer-use call drag --args '{"app":"Google Chrome","from_x":400,"from_y":250,"to_x":880,"to_y":250,"drag_method":"sky","path":[[500,320],[640,345],[780,320]],"modifiers":["shift"]}'
+```
+
+Without `drag_method` (`auto`), the path is decided by the same process-level gate that authorizes `click_method: "global"`:
 
 - Gate unset (default): mouse move / down / dragged / up events are posted directly to the target process with `CGEvent.postToPid`. The system pointer does not move and foreground focus is unchanged. Because the events never pass through the window server, this path cannot start a window-server drag session: window moves, drag-selecting text, and Finder drag-and-drop return without error but have no visible effect.
 - `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` set for the server process: the drag uses the global pointer path, which drives window-server drag sessions but may move the real pointer and change foreground focus.
 
-Every non-fixture `drag` result includes a text item that begins `Drag delivered via app_post` or `Drag delivered via global pointer path`, so a default drag that did nothing is legible instead of looking like success. For an MCP server the variable belongs in the server entry's `env`, not in the calling shell, and the server must be restarted afterwards.
+Every non-fixture `drag` result includes a text item that begins `Drag delivered via app_post`, `Drag delivered via SkyLight` or `Drag delivered via global pointer path`, so a default drag that did nothing is legible instead of looking like success. For an MCP server the variable belongs in the server entry's `env`, not in the calling shell, and the server must be restarted afterwards.
 
 When the gate is not enabled, treat window-server drags as unavailable and reach the same outcome another way: copy or move files with a shell command instead of a Finder drag, use `set_value` or keyboard selection instead of drag-selecting text, and use the app's own window controls instead of dragging a title bar.
+
+## Staying in the Background (macOS)
+
+Every interaction must leave the user's frontmost app, window order and pointer untouched:
+
+- `get_app_state` and actions never activate or raise the target. When the app's only windows are minimized, `get_app_state` moves one onto the agent display and un-minimizes it there, so it never appears on the user's screen; `window_placement: "restore"` (or the end of the turn) minimizes it again where it was. A hidden app (`cmd+h`) is handled the same way: its windows move onto the agent display, then the app is unhidden without activation, and restore hides it again before moving them back (unless the user switched to it meanwhile).
+- Native context menus (AppKit menus, not menus a web page draws) do not open in a background app: a right-click reaches the app but the menu closes at once. Use the element's accessibility actions instead.
+- Hosts should run `open-computer-use turn-ended` when an agent turn ends (a Claude Code `Stop` hook, Codex `notify`) so parked windows go back and Locked Use relocks. Each agent session's turn end and disconnect only affect the windows that session parked or pinned, even with several sessions open. Windows already captured stay pinned across turns, so covered and other-Space windows keep rendering; a Chromium window ocu has never seen unoccluded needs `window_placement: "agent_display"` once.
+- Prefer `click_method: "sky_click"`, `drag_method: "sky"` and `key_method: "sky_key"` for Chromium and Electron apps.
+- Avoid app shortcuts that bring their own window forward. In Chrome, `cmd+l` raises the browser window; to navigate, `sky_click` the address bar, `set_value` the URL on the address field, then `press_key` `Return` with `key_method: "sky_key"`.
+- Do not set `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS` or `OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION` unless the user explicitly asks for foreground behavior.
 
 ## Text Selection (macOS)
 

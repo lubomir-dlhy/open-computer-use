@@ -665,16 +665,37 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(instructions, computerUseServerInstructions)
     }
 
-    func testMCPTurnEndedNotificationResetsBackgroundStateWithoutResponse() {
-        var resetCount = 0
+    func testMCPTurnEndedNotificationResetsTurnStateWithoutResponse() {
+        var sessionResets = 0
+        var turnResets = 0
+        var sessions: Set<Int> = []
         let server = StdioMCPServer(
             service: ComputerUseService(),
-            backgroundStateReset: { resetCount += 1 }
+            backgroundStateReset: { sessionResets += 1; sessions.insert($0) },
+            turnStateReset: { turnResets += 1; sessions.insert($0) }
         )
         let response = server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"type":"agent-turn-complete"}}"#)
 
         XCTAssertNil(response)
-        XCTAssertEqual(resetCount, 1)
+        XCTAssertEqual(turnResets, 1)
+        XCTAssertEqual(sessionResets, 0)
+
+        server.endSession()
+        XCTAssertEqual(sessionResets, 1)
+        XCTAssertEqual(turnResets, 2)
+        XCTAssertEqual(sessions, [server.sessionID])
+        XCTAssertNotEqual(StdioMCPServer().sessionID, server.sessionID)
+    }
+
+    func testTurnEndedReachesOnlyTheSendersOwnHost() {
+        // Two hosts under one app: each proxy runs as host → node shim → proxy.
+        let sessions: [Int: [pid_t]] = [1: [300, 200, 100, 1], 2: [310, 210, 100, 1]]
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [400, 390, 200, 100, 1], sessionAncestries: sessions), [1])
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [500, 50, 1], sessionAncestries: sessions), [1, 2])
+        XCTAssertEqual(turnEndedRecipients(senderAncestry: [], sessionAncestries: sessions), [1, 2])
+        XCTAssertEqual(decodeProcessAncestry(encodeProcessAncestry([12, 3, 1])), [12, 3, 1])
+        XCTAssertEqual(processAncestry().first, getpid())
+        XCTAssertEqual(processAncestry().last, 1)
     }
 
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
@@ -1585,11 +1606,29 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(InputSimulation.needsDragEventNumber(majorVersion: 27))
     }
 
-    func testDragDeliveryPathFollowsGlobalPointerGate() {
-        XCTAssertEqual(dragDeliveryPath(environment: [:]), .appPost)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]), .appPost)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]), .global)
-        XCTAssertEqual(dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": " True "]), .global)
+    func testDragDeliveryPathFollowsGlobalPointerGate() throws {
+        XCTAssertEqual(try dragDeliveryPath(environment: [:]), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]), .global)
+        XCTAssertEqual(try dragDeliveryPath(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": " True "]), .global)
+    }
+
+    func testForegroundActivationIsOptIn() {
+        XCTAssertFalse(foregroundActivationEnabled(environment: [:]))
+        XCTAssertFalse(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION": "0"]))
+        XCTAssertFalse(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]))
+        XCTAssertTrue(foregroundActivationEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION": " Yes "]))
+    }
+
+    func testExplicitDragMethodOverridesGateExceptGlobal() throws {
+        let gateOn = ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]
+        XCTAssertEqual(try dragDeliveryPath(environment: gateOn, method: .sky), .sky)
+        XCTAssertEqual(try dragDeliveryPath(environment: gateOn, method: .appPost), .appPost)
+        XCTAssertEqual(try dragDeliveryPath(environment: [:], method: .sky), .sky)
+        XCTAssertThrowsError(try dragDeliveryPath(environment: [:], method: .global))
+        XCTAssertEqual(try parseDragMethod(nil), .auto)
+        XCTAssertEqual(try parseDragMethod(" SKY "), .sky)
+        XCTAssertThrowsError(try parseDragMethod("sky_click"))
     }
 
     func testDragDeliveryNoteExplainsWhyDefaultPathCannotDriveWindowServerDrags() {
@@ -1714,33 +1753,54 @@ final class OpenComputerUseKitTests: XCTestCase {
         )
     }
 
-    func testSkyClickArgumentsRequireLeftButtonAndSingleOrDoubleClick() throws {
+    func testSkyClickArgumentsAcceptAnyButtonUpToTripleClick() throws {
         XCTAssertNoThrow(
             try validateSkyClickArguments(method: .skyClick, mouseButton: " LEFT ", clickCount: 1)
         )
         XCTAssertNoThrow(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 2)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "right", clickCount: 1)
+        )
+        XCTAssertNoThrow(
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "middle", clickCount: 3)
         )
         XCTAssertNoThrow(
             try validateSkyClickArguments(method: .appPost, mouseButton: "right", clickCount: 5)
         )
 
         XCTAssertThrowsError(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "right", clickCount: 1)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "back", clickCount: 1)
         ) { error in
             XCTAssertEqual(
                 (error as? ComputerUseError)?.errorDescription,
-                "click_method 'sky_click' only supports mouse_button 'left'"
+                "click_method 'sky_click' supports mouse_button left, right or middle"
             )
         }
         XCTAssertThrowsError(
-            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 3)
+            try validateSkyClickArguments(method: .skyClick, mouseButton: "left", clickCount: 4)
         ) { error in
             XCTAssertEqual(
                 (error as? ComputerUseError)?.errorDescription,
-                "click_method 'sky_click' supports click_count 1 or 2"
+                "click_method 'sky_click' supports click_count 1, 2 or 3"
             )
         }
+        XCTAssertThrowsError(
+            try validateSkyClickArguments(method: .appPost, mouseButton: "left", clickCount: 1, modifiers: .maskCommand)
+        )
+    }
+
+    func testMouseModifiersParseAliasesAndRejectUnknownKeys() throws {
+        XCTAssertEqual(try parseMouseModifiers(nil), [])
+        XCTAssertEqual(try parseMouseModifiers(["Cmd", "shift"]), [.maskCommand, .maskShift])
+        XCTAssertEqual(try parseMouseModifiers(["alt", "ctrl"]), [.maskAlternate, .maskControl])
+        XCTAssertThrowsError(try parseMouseModifiers(["fn"]))
+    }
+
+    func testSkyEventTypesFollowRequestedButton() {
+        XCTAssertEqual(SkyClickEventKind.down.cgEventType(button: .right), .rightMouseDown)
+        XCTAssertEqual(SkyClickEventKind.up.cgEventType(button: .middle), .otherMouseUp)
+        XCTAssertEqual(SkyClickEventKind.dragged.cgEventType(button: .left), .leftMouseDragged)
+        XCTAssertEqual(SkyClickEventKind.moved.cgEventType(button: .right), .mouseMoved)
+        XCTAssertEqual(MouseButtonKind.right.skyButtonNumber, 1)
     }
 
     func testSkyClickRecipeIncludesMovePrimerAndTargetPairs() throws {
@@ -1759,11 +1819,11 @@ final class OpenComputerUseKitTests: XCTestCase {
     }
 
     func testSkyClickRecipeRejectsUnsupportedClickCounts() {
-        for count in [0, 3] {
+        for count in [0, 4] {
             XCTAssertThrowsError(try skyClickEventRecipe(clickCount: count)) { error in
                 XCTAssertEqual(
                     (error as? ComputerUseError)?.errorDescription,
-                    "click_method 'sky_click' supports click_count 1 or 2"
+                    "click_method 'sky_click' supports click_count 1, 2 or 3"
                 )
             }
         }
@@ -1920,6 +1980,12 @@ final class OpenComputerUseKitTests: XCTestCase {
         let huge = agentDisplayPlacement(windowSize: CGSize(width: 4000, height: 3000), displayBounds: display)
         XCTAssertEqual(huge, CGPoint(x: 1512, y: 0), "oversized windows are pinned to the display origin")
         XCTAssertTrue(display.contains(huge))
+        XCTAssertEqual(agentDisplaySize(userDisplays: []), CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(agentDisplaySize(userDisplays: [CGRect(x: 0, y: 0, width: 1512, height: 982)]), CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(
+            agentDisplaySize(userDisplays: [CGRect(x: 0, y: 0, width: 2048, height: 1330), CGRect(x: 2048, y: 0, width: 1920, height: 1080)]),
+            CGSize(width: 2128, height: 1410)
+        )
         for name in ["get_app_state"] {
             let tool = ToolDefinitions.all.first { $0.name == name }
             let properties = tool?.inputSchema["properties"] as? [String: Any]
@@ -1984,6 +2050,35 @@ final class OpenComputerUseKitTests: XCTestCase {
         keepAlive.releaseAll(spi: spi)
         XCTAssertFalse(keepAlive.isPinned(windowID: 101))
         XCTAssertEqual(spi.states[101], true)
+    }
+
+    func testOcclusionPinsStayWhileAnotherSessionUsesThem() {
+        final class FakeOcclusionSPI: WindowOcclusionControlling {
+            let occlusionCapability = SkyLightSPICapability(missingSymbols: [], feature: "occlusion")
+            var states: [CGWindowID: Bool] = [:]
+
+            func setWindowOcclusionNotificationsEnabled(_ enabled: Bool, windowID: CGWindowID) throws -> Bool {
+                defer { states[windowID] = enabled }
+                return states[windowID] ?? true
+            }
+        }
+
+        let keepAlive = WindowOcclusionKeepAlive()
+        let spi = FakeOcclusionSPI()
+        let bounds = CGRect(x: 10, y: 10, width: 100, height: 100)
+        SessionOwner.with(1) {
+            _ = keepAlive.keepVisible(windowID: 201, bounds: bounds, spi: spi)
+            _ = keepAlive.keepVisible(windowID: 202, bounds: bounds, spi: spi)
+        }
+        SessionOwner.with(2) { _ = keepAlive.keepVisible(windowID: 201, bounds: bounds, spi: spi) }
+
+        keepAlive.releaseAll(owner: 1, spi: spi)
+        XCTAssertTrue(keepAlive.isPinned(windowID: 201))
+        XCTAssertFalse(keepAlive.isPinned(windowID: 202))
+
+        keepAlive.releaseAll(owner: 2, spi: spi)
+        XCTAssertFalse(keepAlive.isPinned(windowID: 201))
+        XCTAssertEqual(spi.states[201], true)
     }
 
     func testKeyMethodParsingAndPolicy() throws {

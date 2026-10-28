@@ -13,6 +13,7 @@ struct SkyClickTarget {
 enum SkyClickEventKind: Equatable, Sendable {
     case moved
     case down
+    case dragged
     case up
 
     var cgEventType: CGEventType {
@@ -21,8 +22,40 @@ enum SkyClickEventKind: Equatable, Sendable {
             return .mouseMoved
         case .down:
             return .leftMouseDown
+        case .dragged:
+            return .leftMouseDragged
         case .up:
             return .leftMouseUp
+        }
+    }
+
+    func cgEventType(button: MouseButtonKind) -> CGEventType {
+        switch (self, button) {
+        case (.moved, _):
+            return .mouseMoved
+        case (.down, _):
+            return button.downEvent
+        case (.up, _):
+            return button.upEvent
+        case (.dragged, .left):
+            return .leftMouseDragged
+        case (.dragged, .right):
+            return .rightMouseDragged
+        case (.dragged, .middle):
+            return .otherMouseDragged
+        }
+    }
+}
+
+extension MouseButtonKind {
+    var skyButtonNumber: Int64 {
+        switch self {
+        case .left:
+            return 0
+        case .right:
+            return 1
+        case .middle:
+            return 2
         }
     }
 }
@@ -41,9 +74,9 @@ struct SkyClickEventStep: Equatable, Sendable {
 }
 
 func skyClickEventRecipe(clickCount: Int) throws -> [SkyClickEventStep] {
-    guard (1...2).contains(clickCount) else {
+    guard (1...3).contains(clickCount) else {
         throw ComputerUseError.message(
-            "click_method 'sky_click' supports click_count 1 or 2"
+            "click_method 'sky_click' supports click_count 1, 2 or 3"
         )
     }
 
@@ -109,6 +142,8 @@ enum SkyClickDispatcher {
     static func click(
         target: SkyClickTarget,
         clickCount: Int,
+        button: MouseButtonKind = .left,
+        modifiers: CGEventFlags = [],
         spi: SkyLightSPI = .shared
     ) throws {
         try requireUsableComputerUseSession()
@@ -150,16 +185,20 @@ enum SkyClickDispatcher {
         do {
             for step in recipe {
                 try requireUsableComputerUseSession()
-                let screenPoint = step.pointKind == .target ? target.screenPoint : primerScreenPoint
-                let windowPoint = step.pointKind == .target ? target.windowPoint : primerWindowPoint
+                let isTarget = step.pointKind == .target
+                let screenPoint = isTarget ? target.screenPoint : primerScreenPoint
+                let windowPoint = isTarget ? target.windowPoint : primerWindowPoint
+                // The primer stays a plain left click; only the target events carry the requested button and modifiers.
+                let stepButton: MouseButtonKind = isTarget ? button : .left
+                let eventType = step.kind.cgEventType(button: stepButton)
                 guard let event = CGEvent(
                     mouseEventSource: source,
-                    mouseType: step.kind.cgEventType,
+                    mouseType: eventType,
                     mouseCursorPosition: screenPoint,
-                    mouseButton: .left
+                    mouseButton: stepButton.cgButton
                 ) else {
                     throw ComputerUseError.message(
-                        "Failed to create sky_click mouse event \(step.kind.cgEventType.rawValue)."
+                        "Failed to create sky_click mouse event \(eventType.rawValue)."
                     )
                 }
 
@@ -170,15 +209,16 @@ enum SkyClickDispatcher {
                     clickState: step.clickState,
                     phase: step.phase,
                     clickGroupID: clickGroupID,
+                    buttonNumber: stepButton.skyButtonNumber,
                     spi: spi
                 )
+                if isTarget, step.kind != .moved {
+                    event.flags = modifiers
+                }
 
-                // The current Cua Driver Chromium recipe deliberately posts through
-                // both channels: SkyLight reaches Chromium/Catalyst while the public
-                // path preserves AppKit compatibility. This is one dispatch policy,
-                // not a retry after an observed failure.
+                // SkyLight alone reaches both Chromium and AppKit; also posting through
+                // CGEvent.postToPid delivered every event twice.
                 try spi.postToPid(event, pid: target.pid)
-                event.postToPid(target.pid)
 
                 let delay = step.delayAfter * InputTiming.skyClickDelayScale
                 if delay > 0 {
@@ -202,6 +242,131 @@ enum SkyClickDispatcher {
             }
             try spi.endSyntheticTargetFocus(focusContext)
         }
+    }
+
+    /// Background drag through the same SkyLight path as `click`: the system
+    /// pointer does not move and only the target app receives synthetic focus.
+    static func drag(
+        through points: [SkyClickTarget],
+        modifiers: CGEventFlags = [],
+        spi: SkyLightSPI = .shared
+    ) throws {
+        guard let start = points.first, let end = points.last, points.count >= 2 else {
+            throw ComputerUseError.message("drag_method 'sky' requires at least a start and an end point")
+        }
+        try requireUsableComputerUseSession()
+        guard spi.capability.isAvailable else {
+            throw ComputerUseError.message(
+                "drag_method 'sky' is unavailable: \(spi.capability.unavailableReason)"
+            )
+        }
+        guard points.allSatisfy({ $0.pid == start.pid && $0.windowID == start.windowID }) else {
+            throw ComputerUseError.message("drag_method 'sky' requires every point in the same window")
+        }
+
+        dispatchLock.lock()
+        let startTime = TimingLog.now()
+        defer {
+            TimingLog.log("sky_drag.total", since: startTime)
+            dispatchLock.unlock()
+        }
+
+        for point in points {
+            try validate(target: point)
+        }
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw ComputerUseError.message("Failed to create SkyLight HID event source.")
+        }
+
+        let clickGroupID = Int64(DispatchTime.now().uptimeNanoseconds % 1_000_000_000)
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let focusContext: SkyLightSyntheticFocusContext? = frontmostPID == start.pid
+            ? nil
+            : try spi.beginSyntheticTargetFocus(targetPID: start.pid, targetWindowID: start.windowID)
+
+        var previousScreenPoint = start.screenPoint
+        func post(
+            _ kind: SkyClickEventKind,
+            screenPoint: CGPoint,
+            windowPoint: CGPoint,
+            clickState: Int64,
+            phase: Int64,
+            delayAfter: TimeInterval
+        ) throws {
+            try requireUsableComputerUseSession()
+            guard let event = CGEvent(
+                mouseEventSource: source,
+                mouseType: kind.cgEventType,
+                mouseCursorPosition: screenPoint,
+                mouseButton: .left
+            ) else {
+                throw ComputerUseError.message("Failed to create sky drag mouse event \(kind.cgEventType.rawValue).")
+            }
+            try stamp(
+                event,
+                target: start,
+                windowPoint: windowPoint,
+                clickState: clickState,
+                phase: phase,
+                clickGroupID: clickGroupID,
+                buttonNumber: 0,
+                spi: spi
+            )
+            if kind != .moved, screenPoint != primerScreenPoint {
+                event.flags = modifiers
+            }
+            if kind == .dragged {
+                let dx = Int64((screenPoint.x - previousScreenPoint.x).rounded())
+                let dy = Int64((screenPoint.y - previousScreenPoint.y).rounded())
+                event.setIntegerValueField(.mouseEventDeltaX, value: dx)
+                event.setIntegerValueField(.mouseEventDeltaY, value: dy)
+            }
+            previousScreenPoint = screenPoint
+            try spi.postToPid(event, pid: start.pid)
+            let delay = delayAfter * InputTiming.skyClickDelayScale
+            if delay > 0 {
+                Thread.sleep(forTimeInterval: delay)
+            }
+        }
+
+        do {
+            try post(.moved, screenPoint: start.screenPoint, windowPoint: start.windowPoint, clickState: 0, phase: 2, delayAfter: 0.015)
+            try post(.down, screenPoint: primerScreenPoint, windowPoint: primerWindowPoint, clickState: 1, phase: 1, delayAfter: 0.001)
+            try post(.up, screenPoint: primerScreenPoint, windowPoint: primerWindowPoint, clickState: 1, phase: 2, delayAfter: 0.100)
+            try post(.down, screenPoint: start.screenPoint, windowPoint: start.windowPoint, clickState: 1, phase: 3, delayAfter: 0.030)
+            for (from, to) in zip(points, points.dropFirst()) {
+                let stepCount = InputSimulation.dragStepCount(from: from.screenPoint, to: to.screenPoint)
+                for step in 1...stepCount {
+                    let progress = CGFloat(step) / CGFloat(stepCount)
+                    try post(
+                        .dragged,
+                        screenPoint: interpolate(from.screenPoint, to.screenPoint, progress),
+                        windowPoint: interpolate(from.windowPoint, to.windowPoint, progress),
+                        clickState: 1,
+                        phase: 3,
+                        delayAfter: 0.012
+                    )
+                }
+            }
+            try post(.up, screenPoint: end.screenPoint, windowPoint: end.windowPoint, clickState: 1, phase: 3, delayAfter: 0)
+        } catch {
+            if let focusContext {
+                try? spi.endSyntheticTargetFocus(focusContext)
+            }
+            throw error
+        }
+
+        if let focusContext {
+            let rendererSettle = 0.100 * InputTiming.skyClickDelayScale
+            if rendererSettle > 0 {
+                Thread.sleep(forTimeInterval: rendererSettle)
+            }
+            try spi.endSyntheticTargetFocus(focusContext)
+        }
+    }
+
+    private static func interpolate(_ from: CGPoint, _ to: CGPoint, _ progress: CGFloat) -> CGPoint {
+        CGPoint(x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress)
     }
 
     private static func validate(target: SkyClickTarget) throws {
@@ -245,12 +410,13 @@ enum SkyClickDispatcher {
         clickState: Int64,
         phase: Int64,
         clickGroupID: Int64,
+        buttonNumber: Int64,
         spi: SkyLightSPI
     ) throws {
         let windowID = Int64(target.windowID)
         try spi.setIntegerField(event, field: EventField.gesturePhase, value: phase)
         try spi.setIntegerField(event, field: EventField.clickState, value: clickState)
-        try spi.setIntegerField(event, field: EventField.buttonNumber, value: 0)
+        try spi.setIntegerField(event, field: EventField.buttonNumber, value: buttonNumber)
         try spi.setIntegerField(event, field: EventField.subtype, value: 3)
         try spi.setIntegerField(event, field: EventField.targetPID, value: Int64(target.pid))
         try spi.setIntegerField(event, field: EventField.windowNumber, value: windowID)

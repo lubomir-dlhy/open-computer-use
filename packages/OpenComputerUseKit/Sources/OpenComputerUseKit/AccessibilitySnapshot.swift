@@ -211,6 +211,7 @@ enum SnapshotBuilder {
         var focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
         if focusedWindow == nil,
            recoveryPolicy == .allowActivation,
+           foregroundActivationEnabled(),
            recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: nil) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
@@ -218,7 +219,7 @@ enum SnapshotBuilder {
 
         var rootWindow: AXUIElement
         guard let resolvedFocusedWindow = focusedWindow else {
-            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+            throw ComputerUseError.stateUnavailable(backgroundNoWindowMessage)
         }
         rootWindow = resolvedFocusedWindow
 
@@ -232,6 +233,7 @@ enum SnapshotBuilder {
         }
         if windowCapture == nil,
            recoveryPolicy == .allowActivation,
+           foregroundActivationEnabled(),
            recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: rootWindow) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             if let recoveredWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
@@ -243,7 +245,7 @@ enum SnapshotBuilder {
         }
 
         guard let windowCapture else {
-            throw ComputerUseError.stateUnavailable(computerUseNoWindowFoundMessage)
+            throw ComputerUseError.stateUnavailable(backgroundNoWindowMessage)
         }
 
         return buildAccessibilitySnapshot(
@@ -352,6 +354,16 @@ enum SnapshotBuilder {
         )
     }
 
+    private static var backgroundNoWindowMessage: String {
+        guard !foregroundActivationEnabled() else {
+            return computerUseNoWindowFoundMessage
+        }
+        return computerUseNoWindowFoundMessage
+            + ". The app has no usable window (hidden, or minimized and it could not be moved to the agent display)"
+            + " and Open Computer Use does not bring windows forward. Ask the user to show it; afterwards it can stay"
+            + " covered by other windows."
+    }
+
     private static func recoverVisibleWindow(for app: RunningAppDescriptor, appElement: AXUIElement, preferredWindow: AXUIElement?) -> Bool {
         var recovered = false
 
@@ -436,7 +448,27 @@ enum SnapshotBuilder {
                 ?? firstWindow(for: appElement)
         }
 
-        return usableWindowElement(from: copyElement(appElement, attribute: kAXFocusedWindowAttribute)) ?? firstWindow(for: appElement)
+        return usableWindowElement(from: copyElement(appElement, attribute: kAXFocusedWindowAttribute))
+            ?? firstWindow(for: appElement)
+            ?? firstRemoteWindow(pid: appPID)
+    }
+
+    /// A standard window kAXWindows omits, e.g. one on a full-screen Space that
+    /// was never focused. Picks the frontmost in CG window order.
+    private static func firstRemoteWindow(pid: pid_t) -> AXUIElement? {
+        let candidates = SkyLightSPI.shared.remoteWindowElements(pid: pid).filter {
+            isUsableWindowElement($0.element)
+                && stringValue(of: $0.element, attribute: kAXSubroleAttribute) == kAXStandardWindowSubrole as String
+        }
+        guard candidates.count > 1,
+              let order = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return candidates.first?.element
+        }
+        let rank = Dictionary(order.enumerated().compactMap { offset, info in
+            (info[kCGWindowNumber as String] as? NSNumber).map { ($0.uint32Value, offset) }
+        }, uniquingKeysWith: min)
+        return candidates.min { rank[$0.windowID, default: .max] < rank[$1.windowID, default: .max] }?.element
     }
 
     private static func usableWindowElement(from element: AXUIElement?) -> AXUIElement? {
@@ -2426,7 +2458,7 @@ extension SnapshotBuilder {
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
         copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
             SkyLightSPI.shared.windowID(for: $0) == windowID
-        }
+        } ?? SkyLightSPI.shared.remoteWindowElements(pid: pid(of: appElement)).first { $0.windowID == windowID }?.element
     }
 
     // Attributes read for every visited node, in one batched IPC call. Position

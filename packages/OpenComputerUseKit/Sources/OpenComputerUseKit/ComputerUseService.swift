@@ -83,23 +83,48 @@ func parseKeyMethod(_ rawValue: String?) throws -> KeyMethod {
 func validateSkyClickArguments(
     method: ClickMethod,
     mouseButton: String,
-    clickCount: Int
+    clickCount: Int,
+    modifiers: CGEventFlags = []
 ) throws {
     guard method == .skyClick else {
+        if !modifiers.isEmpty {
+            throw ComputerUseError.message("modifiers are only supported with click_method 'sky_click'")
+        }
         return
     }
 
-    guard mouseButton.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == MouseButtonKind.left.rawValue else {
+    guard MouseButtonKind(rawValue: mouseButton.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) != nil else {
         throw ComputerUseError.message(
-            "click_method 'sky_click' only supports mouse_button 'left'"
+            "click_method 'sky_click' supports mouse_button left, right or middle"
         )
     }
 
-    guard (1...2).contains(clickCount) else {
+    guard (1...3).contains(clickCount) else {
         throw ComputerUseError.message(
-            "click_method 'sky_click' supports click_count 1 or 2"
+            "click_method 'sky_click' supports click_count 1, 2 or 3"
         )
     }
+}
+
+func parseMouseModifiers(_ rawValues: [String]?) throws -> CGEventFlags {
+    var flags: CGEventFlags = []
+    for rawValue in rawValues ?? [] {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "cmd", "command":
+            flags.insert(.maskCommand)
+        case "shift":
+            flags.insert(.maskShift)
+        case "option", "alt":
+            flags.insert(.maskAlternate)
+        case "control", "ctrl":
+            flags.insert(.maskControl)
+        default:
+            throw ComputerUseError.message(
+                "Invalid modifier '\(rawValue)'. Expected any of: cmd, shift, option, control"
+            )
+        }
+    }
+    return flags
 }
 
 struct VisualCursorScreenMapping: Equatable {
@@ -236,6 +261,18 @@ func inputFallbackDebugEnabled(environment: [String: String]) -> Bool {
     return ["1", "true", "yes", "on"].contains(rawValue)
 }
 
+/// Activating, unhiding or raising the target puts it in front of the user's work, so it is opt-in.
+func foregroundActivationEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
 func globalPointerFallbacksEnabled(environment: [String: String]) -> Bool {
     guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,13 +305,49 @@ enum DragDeliveryPath: String, CaseIterable {
     /// pass through the window server, so window-server drag sessions (window
     /// moves, text selection, Finder drag-and-drop) are not driven.
     case appPost = "app_post"
+    /// SkyLight pid post with target-only synthetic focus, like `sky_click`:
+    /// reaches Chromium web content without moving the system pointer.
+    case sky
     /// `.cghidEventTap`: drives window-server drag sessions and may move the
     /// real pointer or change foreground focus.
     case global
 }
 
-func dragDeliveryPath(environment: [String: String]) -> DragDeliveryPath {
-    globalPointerFallbacksEnabled(environment: environment) ? .global : .appPost
+public enum DragMethod: String, CaseIterable, Sendable {
+    case auto
+    case appPost = "app_post"
+    case sky
+    case global
+}
+
+func parseDragMethod(_ rawValue: String?) throws -> DragMethod {
+    let normalized = rawValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() ?? DragMethod.auto.rawValue
+    guard let method = DragMethod(rawValue: normalized) else {
+        let expected = DragMethod.allCases.map(\.rawValue).joined(separator: ", ")
+        throw ComputerUseError.message("Invalid drag_method '\(rawValue ?? "")'. Expected one of: \(expected)")
+    }
+    return method
+}
+
+func dragDeliveryPath(environment: [String: String], method: DragMethod = .auto) throws -> DragDeliveryPath {
+    let globalAllowed = globalPointerFallbacksEnabled(environment: environment)
+    switch method {
+    case .auto:
+        return globalAllowed ? .global : .appPost
+    case .appPost:
+        return .appPost
+    case .sky:
+        return .sky
+    case .global:
+        guard globalAllowed else {
+            throw ComputerUseError.message(
+                "drag_method 'global' requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 because it may move the system pointer and change foreground focus"
+            )
+        }
+        return .global
+    }
 }
 
 func dragDeliveryNote(for path: DragDeliveryPath) -> String {
@@ -283,6 +356,8 @@ func dragDeliveryNote(for path: DragDeliveryPath) -> String {
         return "Drag delivered via app_post: mouse events were posted directly to the target process and the system pointer did not move. This path cannot drive window-server drag sessions such as window moves, text selection, or Finder drag-and-drop. If the drag had no effect, set OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 in the server process environment to use the global pointer path, which may move the real pointer and change foreground focus."
     case .global:
         return "Drag delivered via global pointer path: OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS is enabled, so the real pointer may have moved and foreground focus may have changed."
+    case .sky:
+        return "Drag delivered via SkyLight: events were posted to the target window with target-only synthetic focus; the system pointer did not move."
     }
 }
 
@@ -599,11 +674,16 @@ public final class ComputerUseService {
     ) throws -> ToolCallResult {
         try observation.validate()
         guard windowPlacement != .keep else {
-            return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, observation: observation), style: .fullState)
+            return snapshotResult(
+                for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation),
+                style: .fullState
+            )
         }
 
         // Explicit placements never activate or raise; they only move the frame.
-        let snapshot = try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+        let snapshot = windowPlacement == .agentDisplay
+            ? try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+            : try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
         guard snapshot.mode != .fixture else {
             throw ComputerUseError.message("window_placement '\(windowPlacement.rawValue)' is not supported for fixture apps")
         }
@@ -615,6 +695,11 @@ public final class ComputerUseService {
             try AgentDisplay.shared.park(windowID: windowID, pid: snapshot.app.pid, window: windowElement)
         case .restore:
             try AgentDisplay.shared.restoreAll(pid: snapshot.app.pid)
+            do {
+                return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
+            } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
+                return ToolCallResult.text("Restored the app's windows; they are minimized again, as before.")
+            }
         case .keep:
             break
         }
@@ -629,7 +714,8 @@ public final class ComputerUseService {
         y: Double?,
         clickCount: Int,
         mouseButton: String,
-        clickMethod: ClickMethod = .auto
+        clickMethod: ClickMethod = .auto,
+        modifiers: CGEventFlags = []
     ) throws -> ToolCallResult {
         try validateClickMethod(
             clickMethod,
@@ -639,7 +725,8 @@ public final class ComputerUseService {
         try validateSkyClickArguments(
             method: clickMethod,
             mouseButton: mouseButton,
-            clickCount: clickCount
+            clickCount: clickCount,
+            modifiers: modifiers
         )
 
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
@@ -727,6 +814,7 @@ public final class ComputerUseService {
                 case .appPost, .skyClick, .global:
                     try performExplicitMouseClick(
                         method: clickMethod,
+                        modifiers: modifiers,
                         at: targetPoint,
                         windowPoint: windowPoint,
                         button: button,
@@ -766,7 +854,8 @@ public final class ComputerUseService {
                             button: button,
                             clickCount: clickCount,
                             includeNearbyHitTesting: false,
-                            allowActivationFallback: false
+                            allowActivationFallback: false,
+                            clickPoint: point
                         ) {
                             handled = true
                             break
@@ -774,19 +863,35 @@ public final class ComputerUseService {
                     }
 
                     if !handled {
-                        try performNonAXClickFallback(
-                            at: targetPoint,
-                            button: button,
-                            clickCount: clickCount,
-                            targetDescription: "x=\(Int(screenshotPoint.x)) y=\(Int(screenshotPoint.y))",
-                            snapshot: snapshot
-                        )
+                        let targetDescription = "x=\(Int(screenshotPoint.x)) y=\(Int(screenshotPoint.y))"
+                        do {
+                            // Background AppKit windows ignore plain pid-posted clicks; SkyLight reaches them.
+                            try performExplicitMouseClick(
+                                method: .skyClick,
+                                modifiers: modifiers,
+                                at: targetPoint,
+                                windowPoint: point,
+                                button: button,
+                                clickCount: clickCount,
+                                targetDescription: targetDescription,
+                                snapshot: snapshot
+                            )
+                        } catch {
+                            try performNonAXClickFallback(
+                                at: targetPoint,
+                                button: button,
+                                clickCount: clickCount,
+                                targetDescription: targetDescription,
+                                snapshot: snapshot
+                            )
+                        }
                     }
                 case .accessibility:
                     throw ComputerUseError.message("click_method 'accessibility' requires element_index")
                 case .appPost, .skyClick, .global:
                     try performExplicitMouseClick(
                         method: clickMethod,
+                        modifiers: modifiers,
                         at: targetPoint,
                         windowPoint: point,
                         button: button,
@@ -882,7 +987,16 @@ public final class ComputerUseService {
         return try actionResult(for: query)
     }
 
-    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
+    public func drag(
+        app query: String,
+        fromX: Double,
+        fromY: Double,
+        toX: Double,
+        toY: Double,
+        dragMethod: DragMethod = .auto,
+        via waypoints: [CGPoint] = [],
+        modifiers: CGEventFlags = []
+    ) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
         guard snapshot.observation.includeScreenshot else {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
@@ -893,16 +1007,20 @@ public final class ComputerUseService {
             return try actionResult(for: query)
         }
 
-        let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
-        let end = try screenshotToGlobalPoint(snapshot: snapshot, x: toX, y: toY)
+        let windowPoints = try ([CGPoint(x: fromX, y: fromY)] + waypoints + [CGPoint(x: toX, y: toY)]).map {
+            try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: $0)
+        }
+        let globalPoints = try windowPoints.map { try windowPointToGlobalPoint(snapshot: snapshot, point: $0) }
         let path = try performDragEvent(
-            from: start,
-            to: end,
+            windowPoints: windowPoints,
+            globalPoints: globalPoints,
+            method: dragMethod,
+            modifiers: modifiers,
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
         return appendingDragDeliveryNote(
-            to: try actionResult(for: query),
+            to: try actionResult(for: query, recoveryPolicy: path == .sky ? .readOnly : .allowActivation),
             path: path
         )
     }
@@ -1214,6 +1332,33 @@ public final class ComputerUseService {
     }
 
     @discardableResult
+    /// A minimized window is un-minimized, and a hidden app unhidden, on the
+    /// agent display instead of in front of the user.
+    private func snapshotParkingMinimizedWindow(
+        for query: String,
+        textLimit: SnapshotTextLimit,
+        treeLimits: AccessibilityTreeLimits,
+        recoveryPolicy: SnapshotRecoveryPolicy,
+        observation: SnapshotObservationOptions
+    ) throws -> AppSnapshot {
+        // A hidden app's tree is readable, but its screenshot is blank and
+        // coordinate clicks never reach it.
+        if !foregroundActivationEnabled(), AgentDisplay.shared.isSupported,
+           let app = try? AppDiscovery.resolve(query), app.name != FixtureBridge.appName {
+            _ = try AgentDisplay.shared.parkHiddenApp(pid: app.pid)
+        }
+        do {
+            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: recoveryPolicy, observation: observation)
+        } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
+            guard !foregroundActivationEnabled(),
+                  AgentDisplay.shared.isSupported,
+                  try AgentDisplay.shared.parkMinimizedWindow(pid: AppDiscovery.resolve(query).pid) else {
+                throw ComputerUseError.stateUnavailable(message)
+            }
+            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+        }
+    }
+
     private func refreshSnapshot(
         for query: String,
         textLimit: SnapshotTextLimit = .defaults,
@@ -1397,7 +1542,8 @@ public final class ComputerUseService {
         button: MouseButtonKind,
         clickCount: Int,
         includeNearbyHitTesting: Bool,
-        allowActivationFallback: Bool
+        allowActivationFallback: Bool,
+        clickPoint: CGPoint? = nil
     ) throws -> Bool {
         let preferContainingWebRowAXClick = shouldPreferContainingWebRowAXClick(record, in: snapshot)
         debugClickDecision("record=\(clickDebugDescription(record)) preferContainingWebRowAXClick=\(preferContainingWebRowAXClick)")
@@ -1416,7 +1562,9 @@ public final class ComputerUseService {
                 return true
             }
 
-            for candidate in descendantClickCandidates(for: record, snapshot: snapshot) {
+            // A click on a window's blank area must not fall through to its close or minimize button.
+            for candidate in descendantClickCandidates(for: record, snapshot: snapshot)
+            where clickPoint.map({ candidate.localFrame?.contains($0) ?? false }) ?? true {
                 if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                     debugClickDecision("handled by descendant \(clickDebugDescription(candidate))")
                     pauseBeforeReadBack(0.15)
@@ -1460,6 +1608,7 @@ public final class ComputerUseService {
 
         guard
             allowActivationFallback,
+            foregroundActivationEnabled(),
             !record.isSyntheticText,
             button == .left,
             let element = record.element,
@@ -2222,14 +2371,20 @@ public final class ComputerUseService {
     }
 
     private func performDragEvent(
-        from start: CGPoint,
-        to end: CGPoint,
+        windowPoints: [CGPoint],
+        globalPoints: [CGPoint],
+        method: DragMethod,
+        modifiers: CGEventFlags,
         targetDescription: String,
         snapshot: AppSnapshot
     ) throws -> DragDeliveryPath {
-        let eventStart = inputEventPoint(fromScreenStatePoint: start)
-        let eventEnd = inputEventPoint(fromScreenStatePoint: end)
-        let path = dragDeliveryPath(environment: ProcessInfo.processInfo.environment)
+        let eventPoints = globalPoints.map { inputEventPoint(fromScreenStatePoint: $0) }
+        let eventStart = eventPoints[0]
+        let eventEnd = eventPoints[eventPoints.count - 1]
+        let path = try dragDeliveryPath(environment: ProcessInfo.processInfo.environment, method: method)
+        if path != .sky, eventPoints.count > 2 || !modifiers.isEmpty {
+            throw ComputerUseError.message("path and modifiers are only supported with drag_method 'sky'")
+        }
 
         switch path {
         case .global:
@@ -2242,6 +2397,18 @@ public final class ComputerUseService {
             try InputSimulation.dragGlobally(from: eventStart, to: eventEnd)
         case .appPost:
             try InputSimulation.dragTargeted(from: eventStart, to: eventEnd, pid: snapshot.app.pid)
+        case .sky:
+            guard let windowBounds = snapshot.windowBounds, let windowID = snapshot.targetWindowID else {
+                throw ComputerUseError.stateUnavailable(
+                    "drag_method 'sky' requires a current target window. Run get_app_state again."
+                )
+            }
+            try SkyClickDispatcher.drag(
+                through: zip(eventPoints, windowPoints).map {
+                    SkyClickTarget(screenPoint: $0, windowPoint: $1, windowBounds: windowBounds, windowID: windowID, pid: snapshot.app.pid)
+                },
+                modifiers: modifiers
+            )
         }
 
         return path
@@ -2286,6 +2453,7 @@ public final class ComputerUseService {
 
     private func performExplicitMouseClick(
         method: ClickMethod,
+        modifiers: CGEventFlags,
         at point: CGPoint,
         windowPoint: CGPoint,
         button: MouseButtonKind,
@@ -2317,6 +2485,8 @@ public final class ComputerUseService {
                 windowBounds: windowBounds,
                 windowID: windowID,
                 clickCount: clickCount,
+                button: button,
+                modifiers: modifiers,
                 pid: snapshot.app.pid
             )
         case .global:

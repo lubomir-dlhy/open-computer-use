@@ -81,7 +81,8 @@ public final class ComputerUseToolDispatcher {
                 y: optionalDouble("y", in: arguments),
                 clickCount: Int(optionalDouble("click_count", in: arguments) ?? 1),
                 mouseButton: optionalString("mouse_button", in: arguments) ?? "left",
-                clickMethod: try parseClickMethod(optionalString("click_method", in: arguments))
+                clickMethod: try parseClickMethod(optionalString("click_method", in: arguments)),
+                modifiers: try parseMouseModifiers(optionalStringArray("modifiers", in: arguments))
             )
         case "perform_secondary_action":
             return try service.performSecondaryAction(
@@ -102,7 +103,10 @@ public final class ComputerUseToolDispatcher {
                 fromX: requireDouble("from_x", in: arguments),
                 fromY: requireDouble("from_y", in: arguments),
                 toX: requireDouble("to_x", in: arguments),
-                toY: requireDouble("to_y", in: arguments)
+                toY: requireDouble("to_y", in: arguments),
+                dragMethod: try parseDragMethod(optionalString("drag_method", in: arguments)),
+                via: try optionalPointArray("path", in: arguments),
+                modifiers: try parseMouseModifiers(optionalStringArray("modifiers", in: arguments))
             )
         case "type_text":
             return try service.typeText(
@@ -186,6 +190,29 @@ public final class ComputerUseToolDispatcher {
 
     private func optionalString(_ key: String, in arguments: [String: Any]) -> String? {
         arguments[key] as? String
+    }
+
+    private func optionalStringArray(_ key: String, in arguments: [String: Any]) throws -> [String]? {
+        guard let value = arguments[key] else { return nil }
+        guard let strings = value as? [String] else {
+            throw ComputerUseError.message("\(key) must be an array of strings")
+        }
+        return strings
+    }
+
+    private func optionalPointArray(_ key: String, in arguments: [String: Any]) throws -> [CGPoint] {
+        guard let value = arguments[key] else { return [] }
+        guard let items = value as? [Any] else {
+            throw ComputerUseError.message("\(key) must be an array of [x, y] pairs")
+        }
+        return try items.map { item in
+            guard let pair = item as? [Any], pair.count == 2,
+                  let x = (pair[0] as? NSNumber)?.doubleValue, let y = (pair[1] as? NSNumber)?.doubleValue
+            else {
+                throw ComputerUseError.message("\(key) must be an array of [x, y] pairs")
+            }
+            return CGPoint(x: x, y: y)
+        }
     }
 
     private func selectionString(_ key: String, in arguments: [String: Any]) throws -> String? {

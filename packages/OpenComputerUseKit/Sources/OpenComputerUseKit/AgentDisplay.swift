@@ -37,6 +37,17 @@ func agentDisplayPlacement(windowSize: CGSize, displayBounds: CGRect, inset: CGF
     )
 }
 
+/// Size of the agent display: large enough for any window that fits on one of
+/// the user's displays, so a parked window never spills back onto them.
+func agentDisplaySize(userDisplays: [CGRect], minimum: CGSize = CGSize(width: 1920, height: 1080), inset: CGFloat = 40) -> CGSize {
+    let width = userDisplays.map(\.width).max() ?? 0
+    let height = userDisplays.map(\.height).max() ?? 0
+    return CGSize(
+        width: max(minimum.width, (width + 2 * inset).rounded(.up)),
+        height: max(minimum.height, (height + 2 * inset).rounded(.up))
+    )
+}
+
 /// The agent's own display: a virtual display (the mechanism behind Screen
 /// Sharing's headless sessions) that the user never sees. A window parked on it
 /// is genuinely on screen for WindowServer, so its app renders it, exposes its
@@ -47,7 +58,6 @@ func agentDisplayPlacement(windowSize: CGSize, displayBounds: CGRect, inset: CGF
 final class AgentDisplay: @unchecked Sendable {
     static let shared = AgentDisplay()
 
-    static let displaySize = CGSize(width: 1920, height: 1080)
     // Upper bounds for the polls; the observed values are far lower and are
     // logged with OPEN_COMPUTER_USE_DEBUG_TIMING=1.
     static let displaySettle: TimeInterval = 3.0
@@ -60,6 +70,9 @@ final class AgentDisplay: @unchecked Sendable {
         let pid: pid_t
         let element: AXUIElement
         let originalPosition: CGPoint
+        var wasMinimized = false
+        var wasHidden = false
+        var owner = 0
     }
 
     private let lock = NSLock()
@@ -91,7 +104,7 @@ final class AgentDisplay: @unchecked Sendable {
 
     /// Move `window` onto the agent display. Returns the display bounds.
     @discardableResult
-    func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement) throws -> CGRect {
+    func park(windowID: CGWindowID, pid: pid_t, window: AXUIElement, unminimize: Bool = false, appHidden: Bool = false) throws -> CGRect {
         lock.lock()
         defer { lock.unlock() }
 
@@ -104,12 +117,32 @@ final class AgentDisplay: @unchecked Sendable {
             throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not read the window position")
         }
         let size = axSize(window) ?? CGSize(width: 800, height: 600)
+        guard size.width <= bounds.width, size.height <= bounds.height else {
+            throw ComputerUseError.stateUnavailable("window_placement 'agent_display' cannot fit a \(Int(size.width))x\(Int(size.height)) window on the agent display")
+        }
         let target = agentDisplayPlacement(windowSize: size, displayBounds: bounds)
         let start = TimingLog.now()
         try setAXPosition(window, target)
-        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position)
+        if unminimize || appHidden {
+            // Un-minimizing or unhiding before the move has landed would show the window on the user's display.
+            guard let moved = axPoint(window, kAXPositionAttribute as String),
+                  abs(moved.x - target.x) < 1, abs(moved.y - target.y) < 1 else {
+                try? setAXPosition(window, position)
+                throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not move the \(unminimize ? "minimized" : "hidden") window onto the agent display")
+            }
+        }
+        if unminimize {
+            guard AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success else {
+                try? setAXPosition(window, position)
+                throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not un-minimize the window")
+            }
+        }
+        parked[windowID] = ParkedWindow(pid: pid, element: window, originalPosition: position, wasMinimized: unminimize, wasHidden: appHidden, owner: SessionOwner.current)
         installExitHookIfNeeded()
-        waitForWindow(windowID, toLandOn: displaySpaceIDs, or: bounds)
+        // A hidden app's windows have no on-screen frame until it is unhidden.
+        if !appHidden {
+            waitForWindow(windowID, toLandOn: displaySpaceIDs, or: bounds)
+        }
         TimingLog.log("agent_display.park", since: start)
         return bounds
     }
@@ -157,6 +190,27 @@ final class AgentDisplay: @unchecked Sendable {
             return
         }
         let start = TimingLog.now()
+        if entry.wasHidden {
+            // Hiding is asynchronous; removing the display before the window is
+            // ordered out would let macOS move it onto the user's display.
+            if Self.rehideUnlessFrontmost(pid: entry.pid) {
+                _ = waitUntil(timeout: Self.moveSettle) { !Self.isOnscreen(windowID) }
+            }
+            try? setAXPosition(entry.element, entry.originalPosition)
+            parked.removeValue(forKey: windowID)
+            TimingLog.log("agent_display.restore", since: start)
+            destroyDisplayIfIdle()
+            return
+        }
+        if entry.wasMinimized {
+            AXUIElementSetAttributeValue(entry.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            // A minimized window has no on-screen frame to confirm the move against.
+            try? setAXPosition(entry.element, entry.originalPosition)
+            parked.removeValue(forKey: windowID)
+            TimingLog.log("agent_display.restore", since: start)
+            destroyDisplayIfIdle()
+            return
+        }
         do {
             try setAXPosition(entry.element, entry.originalPosition)
         } catch {
@@ -192,9 +246,105 @@ final class AgentDisplay: @unchecked Sendable {
         destroyDisplayIfIdle()
     }
 
-    func restoreAll() {
+    /// Park every window of a hidden (cmd+H) app, then unhide it without
+    /// activating it, so its windows render only on the agent display. Returns
+    /// false when the app is not hidden or has no window to park.
+    func parkHiddenApp(pid: pid_t) throws -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        var hidden: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXHiddenAttribute as CFString, &hidden) == .success,
+              (hidden as? Bool) == true else {
+            return false
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else {
+            return false
+        }
+        var parkedIDs: [CGWindowID] = []
+        do {
+            for window in windows {
+                var minimized: CFTypeRef?
+                AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized)
+                guard (minimized as? Bool) != true, let windowID = SkyLightSPI.shared.windowID(for: window) else {
+                    continue
+                }
+                try park(windowID: windowID, pid: pid, window: window, appHidden: true)
+                parkedIDs.append(windowID)
+            }
+        } catch {
+            for windowID in parkedIDs {
+                try? restore(windowID: windowID)
+            }
+            throw error
+        }
+        guard !parkedIDs.isEmpty else {
+            return false
+        }
+        guard AXUIElementSetAttributeValue(appElement, kAXHiddenAttribute as CFString, kCFBooleanFalse) == .success else {
+            for windowID in parkedIDs {
+                try? restore(windowID: windowID)
+            }
+            throw ComputerUseError.stateUnavailable("window_placement 'agent_display' could not unhide the app")
+        }
         lock.lock()
-        let windowIDs = Array(parked.keys)
+        let bounds = try? ensureDisplay()
+        let spaceIDs = displaySpaceIDs
+        lock.unlock()
+        if let bounds {
+            for windowID in parkedIDs {
+                waitForWindow(windowID, toLandOn: spaceIDs, or: bounds)
+            }
+        }
+        return true
+    }
+
+    /// Hide the app again before its windows move back, unless the user
+    /// switched to it meanwhile.
+    private static func rehideUnlessFrontmost(pid: pid_t) -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        if AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &focused) == .success,
+           let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
+            var focusedPID: pid_t = 0
+            if AXUIElementGetPid(focused as! AXUIElement, &focusedPID) == .success, focusedPID == pid {
+                return false
+            }
+        }
+        return AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), kAXHiddenAttribute as CFString, kCFBooleanTrue) == .success
+    }
+
+    private static func isOnscreen(_ windowID: CGWindowID) -> Bool {
+        let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]]
+        return info?.first?[kCGWindowIsOnscreen as String] as? Bool ?? false
+    }
+
+    /// Park the app's first minimized window, un-minimizing it on the agent display
+    /// so it never appears on the user's. Returns false when there is none.
+    func parkMinimizedWindow(pid: pid_t) throws -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else {
+            return false
+        }
+        for window in windows {
+            var minimized: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success,
+                  (minimized as? Bool) == true,
+                  let windowID = SkyLightSPI.shared.windowID(for: window) else {
+                continue
+            }
+            try park(windowID: windowID, pid: pid, window: window, unminimize: true)
+            return true
+        }
+        return false
+    }
+
+    /// Restore every parked window, or only those `owner` parked.
+    func restoreAll(owner: Int? = nil) {
+        lock.lock()
+        let windowIDs = parked.filter { owner == nil || $0.value.owner == owner }.map(\.key)
         lock.unlock()
         for windowID in windowIDs {
             try? restore(windowID: windowID)
@@ -232,7 +382,8 @@ final class AgentDisplay: @unchecked Sendable {
         let spacesBefore = Set((spi.managedDisplaySpaces() ?? [:]).values.flatMap { $0 })
         let start = TimingLog.now()
         var newHandle: UnsafeMutableRawPointer?
-        let id = ocu_virtual_display_create("Open Computer Use", UInt32(Self.displaySize.width), UInt32(Self.displaySize.height), 60, &newHandle)
+        let size = agentDisplaySize(userDisplays: Self.activeDisplayBounds())
+        let id = ocu_virtual_display_create("Open Computer Use", UInt32(size.width), UInt32(size.height), 60, &newHandle)
         guard id != 0, let newHandle else {
             throw ComputerUseError.message("window_placement 'agent_display' could not create the agent display")
         }
@@ -259,6 +410,13 @@ final class AgentDisplay: @unchecked Sendable {
         displaySpaceIDs = newSpaces
         TimingLog.log("agent_display.ready", since: start)
         return displayBounds ?? .zero
+    }
+
+    private static func activeDisplayBounds() -> [CGRect] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(UInt32(ids.count), &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
     }
 
     private func destroyDisplayIfIdle() {
