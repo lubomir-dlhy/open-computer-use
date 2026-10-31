@@ -277,7 +277,7 @@ private func readOnlyAnnotations() -> [String: Any] {
 
 private func keyMethodProperty() -> [String: Any] {
     stringProperty(
-        description: "auto (default), or sky_key: SkyLight background delivery to the current on-screen target window without changing focus",
+        description: "auto (default), or sky_key: authenticated SkyLight key events to the current on-screen target window without changing focus. Try sky_key when auto has no effect, e.g. menu shortcuts like super+s.",
         enumValues: KeyMethod.allCases.map(\.rawValue)
     )
 }
