@@ -198,7 +198,7 @@ enum OpenComputerUseSmokeSuite {
         let tools = try client.listTools()
         let expectedTools: Set<String> = [
             "list_apps", "get_app_state", "query", "click", "perform_secondary_action",
-            "scroll", "drag", "type_text", "press_key", "set_value", "select_text",
+            "scroll", "drag", "type_text", "press_key", "set_value", "select_text", "batch",
         ]
         let toolNames = Set(tools.compactMap { $0["name"] as? String })
         guard tools.count == expectedTools.count, toolNames == expectedTools else {
@@ -233,6 +233,25 @@ enum OpenComputerUseSmokeSuite {
             "y": buttonFrame.midY,
         ])
         try expect(parseCounterValue(state) == initialCounter + 2, "coordinate click should increment the counter again")
+
+        print("4b. lean action results")
+        let diff = try client.callTool("click", arguments: [
+            "app": appName,
+            "element_index": index["fixture-increment"]!.index,
+            "state": "diff",
+        ])
+        try expect(diff.contains("~ ") && parseCounterValue(diff) == initialCounter + 3, "a diff result should report only the changed counter")
+        try expect(!diff.contains("fixture-window"), "a diff result should leave out unchanged elements")
+        let batch = try client.callTool("batch", arguments: [
+            "app": appName,
+            "steps": [
+                ["tool": "click", "element_index": index["fixture-increment"]!.index],
+                ["tool": "click", "element_index": index["fixture-increment"]!.index],
+            ],
+            "state": "full",
+        ])
+        try expect(batch.hasPrefix("Ran 2 steps.") && parseCounterValue(batch) == initialCounter + 5, "batch should run every step and report once")
+        state = batch
 
         print("5. perform_secondary_action")
         let windowIndex = index["fixture-window"]?.index ?? "0"
@@ -362,6 +381,8 @@ enum OpenComputerUseSmokeSuite {
     private static func smokeServerEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY"] = "1"
+        // The steps below read state out of each action's result.
+        environment["OPEN_COMPUTER_USE_ACTION_RESULT"] = "full"
         return environment
     }
 

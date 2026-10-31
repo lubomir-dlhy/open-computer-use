@@ -44,7 +44,87 @@ public final class ComputerUseToolDispatcher {
         self.service = service
     }
 
+    static let actionTools: Set<String> = [
+        "click", "drag", "perform_secondary_action", "press_key", "scroll", "select_text", "set_value", "type_text",
+    ]
+
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        if name == "batch" {
+            return try callBatch(arguments: arguments)
+        }
+        guard Self.actionTools.contains(name) else {
+            return try callSingleTool(name: name, arguments: arguments)
+        }
+        return try service.withActionObservation(try actionObservation(in: arguments)) {
+            try callSingleTool(name: name, arguments: arguments)
+        }
+    }
+
+    private func callBatch(arguments: [String: Any]) throws -> ToolCallResult {
+        let app = try requireString("app", in: arguments)
+        guard let rawSteps = arguments["steps"] as? [Any], !rawSteps.isEmpty, rawSteps.count <= 50 else {
+            throw ComputerUseError.invalidArguments("steps must be an array of 1 to 50 actions")
+        }
+        let steps = try rawSteps.enumerated().map { offset, raw in
+            guard var step = raw as? [String: Any],
+                  let tool = step.removeValue(forKey: "tool") as? String,
+                  Self.actionTools.contains(tool)
+            else {
+                throw ComputerUseError.invalidArguments(
+                    "steps[\(offset)] needs tool set to one of \(Self.actionTools.sorted().joined(separator: ", "))"
+                )
+            }
+            if let stepApp = step["app"] as? String, stepApp != app {
+                throw ComputerUseError.invalidArguments("steps[\(offset)] targets \(stepApp); a batch acts on one app")
+            }
+            step["app"] = app
+            var observation = try actionObservation(in: step) ?? ActionObservation()
+            observation.state = .none
+            observation.screenshot = false
+            let arguments = step
+            return (tool: tool, observation: observation, run: { try self.callSingleTool(name: tool, arguments: arguments) })
+        }
+        return try service.withActionObservation(try actionObservation(in: arguments)) {
+            try service.runBatch(app: app, steps: steps)
+        }
+    }
+
+    /// Per-call result options layered over the process defaults; nil when the call sets none.
+    private func actionObservation(in arguments: [String: Any]) throws -> ActionObservation? {
+        let keys = ["state", "screenshot", "wait_for", "wait_timeout"]
+        guard keys.contains(where: { arguments[$0] != nil }) else {
+            return nil
+        }
+        var observation = service.actionObservation
+        if let raw = arguments["state"] {
+            guard let string = raw as? String, let state = ActionStateMode(rawValue: string) else {
+                throw ComputerUseError.invalidArguments("state must be one of diff, full, none")
+            }
+            observation.state = state
+        }
+        if let raw = arguments["screenshot"] {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw ComputerUseError.invalidArguments("screenshot must be a boolean")
+            }
+            observation.screenshot = number.boolValue
+        }
+        if let raw = arguments["wait_for"] {
+            guard let string = raw as? String, WaitCondition(string) != nil else {
+                throw ComputerUseError.invalidArguments("wait_for must be non-empty text")
+            }
+            observation.waitFor = string
+        }
+        if arguments["wait_timeout"] != nil {
+            guard let seconds = optionalDouble("wait_timeout", in: arguments), seconds > 0,
+                  seconds <= ActionObservation.maxWaitTimeout else {
+                throw ComputerUseError.invalidArguments("wait_timeout must be a number of seconds from 0 to 30")
+            }
+            observation.waitTimeout = seconds
+        }
+        return observation
+    }
+
+    private func callSingleTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         switch name {
         case "list_apps":
             return service.listApps()

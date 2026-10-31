@@ -40,6 +40,7 @@ type_text
 press_key
 set_value
 select_text   (macOS runtime only)
+batch         (macOS runtime only)
 ```
 
 macOS also exposes `query` for targeted AX lookup. These nine core tools remain the cross-platform compatibility surface. The bundled Codex plugin uses a
@@ -109,6 +110,18 @@ discards JavaScript bindings. Use `nodeRepl.write(value)` for explicit output.
 The native `ocu mcp` surface exposes the nine core tools above, plus `query` on macOS. Run
 `ocu capabilities --json` to inspect component availability instead of
 inferring support from a command being present in help.
+
+## Action Results (macOS)
+
+macOS actions return only what changed since the state the agent last saw. `~` is a changed element, `+` an added one (`(in N)` names the parent), and `-` a removed subtree. Element indices the agent already has stay valid. Each action and `batch` also accept:
+
+- `state`: `diff` (default), `full` (the whole tree, the old result) or `none` (`ok`).
+- `screenshot: true` to attach a screenshot. Off by default; call `get_app_state` when you need one.
+- `wait_for: "text"` to return once the text is in the tree; `"!text"` waits until it is gone. `wait_timeout` is in seconds, default 5.
+
+`batch` runs several steps on one app in one call: `{"app": "TextEdit", "steps": [{"tool": "click", "element_index": "4"}, {"tool": "type_text", "text": "Hi"}]}`. Every step's indices refer to the state before the batch, and it stops at the first failing step.
+
+`OPEN_COMPUTER_USE_ACTION_RESULT=full` in the server environment restores the previous results (whole tree plus screenshot). See `docs/lean-action-results.md` in the repository.
 
 ## Direct CLI Tool Calls
 
@@ -305,6 +318,9 @@ uses the latest cached frame, so a slow Accessibility response does not block th
 AX window element is preferred; `CGWindowListCopyWindowInfo` is used only when no AX element is available,
 because it can report an old origin after a move. A failed read keeps the last usable frame. Tracking is
 released when the cursor is cleared or its idle timeout expires.
+
+Cursor animations play while the action runs instead of before it, so they add no latency.
+`OPEN_COMPUTER_USE_VISUAL_CURSOR_BLOCKING=1` makes each action wait for its animation, as before.
 
 This follows the window's position, not layout changes inside it. Refresh app state after a layout change
 before choosing another target. Input delivery continues to use the existing action paths.

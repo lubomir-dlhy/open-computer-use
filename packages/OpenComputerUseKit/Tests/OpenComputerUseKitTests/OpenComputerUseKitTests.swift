@@ -279,10 +279,11 @@ final class OpenComputerUseKitTests: XCTestCase {
     }
 
     func testToolDefinitionCount() {
-        XCTAssertEqual(ToolDefinitions.all.count, 11)
+        XCTAssertEqual(ToolDefinitions.all.count, 12)
         XCTAssertEqual(
             ToolDefinitions.all.map(\.name).sorted(),
             [
+                "batch",
                 "click",
                 "drag",
                 "get_app_state",
@@ -708,13 +709,10 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(windowRelativeFrame(elementFrame: textFieldGlobal, windowBounds: window), textField)
     }
 
-    func testToolDescriptionsMatchOfficialComputerUseSurface() {
+    func testToolDescriptionsKeepTheComputerUseSurface() {
         let tools = Dictionary(uniqueKeysWithValues: ToolDefinitions.all.map { ($0.name, $0) })
 
-        XCTAssertEqual(
-            tools["get_app_state"]?.description,
-            "Start an app use session if needed, then get the state of the app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`."
-        )
+        XCTAssertTrue(tools["get_app_state"]?.description.contains("Call once per turn before acting") == true)
         XCTAssertTrue(tools["press_key"]?.description.contains("xdotool") == true)
         XCTAssertEqual(
             tools["click"]?.annotations["destructiveHint"] as? Bool,
@@ -739,7 +737,6 @@ final class OpenComputerUseKitTests: XCTestCase {
         let dragDescription = tools["drag"]?.description ?? ""
         XCTAssertTrue(dragDescription.contains("OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1"))
         XCTAssertTrue(dragDescription.contains("window moves, text selection, or Finder drag-and-drop"))
-        XCTAssertTrue(dragDescription.hasSuffix("This tool is part of plugin `Computer Use`."))
         let getAppStateSchema = tools["get_app_state"]?.inputSchema
         let getAppStateProperties = getAppStateSchema?["properties"] as? [String: [String: Any]]
         XCTAssertNil(getAppStateProperties?["show_full_text"])
@@ -755,14 +752,8 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(getAppStateSchema?["required"] as? [String], ["app"])
         let scrollPages = (tools["scroll"]?.inputSchema["properties"] as? [String: [String: Any]])?["pages"]
         XCTAssertEqual(scrollPages?["type"] as? String, "number")
-        XCTAssertEqual(
-            scrollPages?["description"] as? String,
-            "Number of pages to scroll. Fractional values are supported. Defaults to 1"
-        )
-        XCTAssertEqual(
-            tools["select_text"]?.description,
-            "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it. This tool is part of plugin `Computer Use`."
-        )
+        XCTAssertEqual(scrollPages?["description"] as? String, "Fractional allowed. Default 1")
+        XCTAssertTrue(tools["select_text"]?.description.contains("exactly as in the tree, including Markdown") == true)
         let selectTextSchema = tools["select_text"]?.inputSchema
         let selectTextProperties = selectTextSchema?["properties"] as? [String: [String: Any]]
         XCTAssertEqual(selectTextSchema?["required"] as? [String], ["app", "element_index", "text"])
@@ -771,23 +762,9 @@ final class OpenComputerUseKitTests: XCTestCase {
             selectTextProperties?["selection"]?["enum"] as? [String],
             ["text", "cursor_before", "cursor_after"]
         )
-        XCTAssertEqual(
-            selectTextProperties?["selection"]?["description"] as? String,
-            "Whether to select the text or place the cursor before or after it. Defaults to text."
-        )
-        XCTAssertEqual(selectTextProperties?["element_index"]?["description"] as? String, "Text element identifier")
-        XCTAssertEqual(
-            selectTextProperties?["prefix"]?["description"] as? String,
-            "Optional text immediately before the target, used to disambiguate repeated matches"
-        )
-        XCTAssertEqual(
-            selectTextProperties?["suffix"]?["description"] as? String,
-            "Optional text immediately after the target, used to disambiguate repeated matches"
-        )
-        XCTAssertEqual(
-            selectTextProperties?["text"]?["description"] as? String,
-            "Target text as shown in the accessibility tree"
-        )
+        XCTAssertEqual(selectTextProperties?["selection"]?["description"] as? String, "Default text")
+        XCTAssertEqual(selectTextProperties?["prefix"]?["description"] as? String, "Text just before the target")
+        XCTAssertEqual(selectTextProperties?["suffix"]?["description"] as? String, "Text just after the target")
     }
 
     func testSelectTextRejectsInvalidSelectionMode() {

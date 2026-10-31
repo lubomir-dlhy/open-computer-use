@@ -22,6 +22,48 @@ public enum VisualCursorSupport {
             }
         }
     }
+
+    /// Plays a cursor animation without holding up the action it illustrates.
+    /// Animations still run one after another; a new move drops the queued ones,
+    /// so the cursor heads for the latest target instead of replaying a backlog.
+    /// `OPEN_COMPUTER_USE_VISUAL_CURSOR_BLOCKING=1` restores waiting for each animation.
+    static func enqueueOnMain(startsMove: Bool, _ body: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread || visualCursorBlocksActions(environment: ProcessInfo.processInfo.environment) {
+            performOnMain(body)
+            return
+        }
+
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                if startsMove {
+                    pendingAnimations.removeAll()
+                }
+                pendingAnimations.append(body)
+                // An animation pumps the run loop, which can deliver this block mid-animation.
+                guard !drainingAnimations else {
+                    return
+                }
+                drainingAnimations = true
+                while !pendingAnimations.isEmpty {
+                    pendingAnimations.removeFirst()()
+                }
+                drainingAnimations = false
+            }
+        }
+    }
+
+    @MainActor static func discardPendingAnimations() {
+        pendingAnimations.removeAll()
+    }
+
+    @MainActor private static var pendingAnimations: [@MainActor () -> Void] = []
+    @MainActor private static var drainingAnimations = false
+}
+
+func visualCursorBlocksActions(environment: [String: String]) -> Bool {
+    let value = environment["OPEN_COMPUTER_USE_VISUAL_CURSOR_BLOCKING"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    return ["1", "true", "yes", "on"].contains(value)
 }
 
 func visualCursorEnabled(environment: [String: String]) -> Bool {
@@ -201,6 +243,8 @@ enum SoftwareCursorOverlay {
     private static var hideTimer: Timer?
     private static var idlePhase: CGFloat = 0
     private static var observationPhase = "hidden"
+    /// Bumped by `reset`, so an animation already playing stops instead of re-showing the cursor.
+    private static var resetGeneration = 0
 
     static func moveCursor(
         to targetPoint: CGPoint,
@@ -296,6 +340,8 @@ enum SoftwareCursorOverlay {
     }
 
     static func reset() {
+        VisualCursorSupport.discardPendingAnimations()
+        resetGeneration += 1
         stopIdleAnimation()
         cancelPendingHide()
         displayedTipPosition = nil
@@ -449,8 +495,12 @@ enum SoftwareCursorOverlay {
         let startTime = CACurrentMediaTime()
         var progress: CGFloat = 0
         var springState = CursorMotionSpringState()
+        let generation = resetGeneration
 
         while true {
+            guard generation == resetGeneration else {
+                return
+            }
             refreshActiveOrderingIfNeeded()
 
             if reanchorIfWindowMoved() {
@@ -648,12 +698,16 @@ enum SoftwareCursorOverlay {
 
     private static func animateClickPulse(at point: CGPoint, clickCount: Int, mouseButton: MouseButtonKind) {
         let pulseBias: CGFloat = mouseButton == .right ? 0.82 : 1
+        let generation = resetGeneration
 
         for pulse in 0..<clickCount {
             let duration = 0.16
             let startTime = CACurrentMediaTime()
 
             while true {
+                guard generation == resetGeneration else {
+                    return
+                }
                 _ = reanchorIfWindowMoved()
                 let elapsed = CACurrentMediaTime() - startTime
                 let rawProgress = min(max(elapsed / duration, 0), 1)

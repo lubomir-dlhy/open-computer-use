@@ -132,7 +132,7 @@ public struct AppSnapshot {
     public let windowBounds: CGRect?
     let targetWindowID: CGWindowID?
     let targetWindowLayer: Int?
-    public let screenshotData: Data?
+    public internal(set) var screenshotData: Data?
     @available(*, deprecated, message: "Use screenshotData; screenshots may be JPEG")
     public var screenshotPNGData: Data? {
         guard let data = screenshotData, data.starts(with: [0x89, 0x50, 0x4e, 0x47]) else { return nil }
@@ -140,6 +140,8 @@ public struct AppSnapshot {
     }
     let mode: SnapshotMode
     let treeLines: [String]
+    /// The element index each tree line renders, nil for continuation lines.
+    var treeLineIndices: [Int?] = []
     let focusedSummary: String?
     let focusedElement: AXUIElement?
     let selectedText: String?
@@ -149,6 +151,22 @@ public struct AppSnapshot {
     let elements: [Int: ElementRecord]
     var screenshotNote: String? = nil
     var observation: SnapshotObservationOptions = .defaults
+    /// Pixel size of the last screenshot the agent saw, kept by a read-back that
+    /// skipped capture so its coordinates still map onto the unchanged window.
+    var carriedScreenshotPixelSize: CGSize? = nil
+    /// Lowest index never issued for this window, so a removed index is not reused.
+    var nextFreshIndex: Int? = nil
+    /// Limits the tree was read with; an action's read-back reuses them.
+    var textLimit: SnapshotTextLimit = .defaults
+    var treeLimits: AccessibilityTreeLimits = .defaults
+
+    var acceptsScreenshotCoordinates: Bool {
+        observation.includeScreenshot || carriedScreenshotPixelSize != nil
+    }
+
+    var indexCeiling: Int {
+        max(nextFreshIndex ?? 0, (elements.keys.filter { $0 < stableIndexLimit }.max() ?? -1) + 1)
+    }
 
     public var renderedText: String {
         renderedText(style: .fullState)
@@ -178,6 +196,33 @@ public struct AppSnapshot {
     }
 }
 
+/// Keeps the indices of elements the agent has already seen when the same window
+/// is read again; elements that are new get indices above any issued before.
+struct StableIndexSeed {
+    let indexByElement: [AXUIElement: Int]
+    let syntheticIndexByElement: [AXUIElement: Int]
+    let nextFreshIndex: Int
+
+    init(previous snapshot: AppSnapshot) {
+        var indexByElement: [AXUIElement: Int] = [:]
+        var syntheticIndexByElement: [AXUIElement: Int] = [:]
+        for (index, record) in snapshot.elements where index < stableIndexLimit {
+            guard let element = record.element else { continue }
+            if record.isSyntheticText {
+                syntheticIndexByElement[element] = index
+            } else {
+                indexByElement[element] = index
+            }
+        }
+        self.indexByElement = indexByElement
+        self.syntheticIndexByElement = syntheticIndexByElement
+        nextFreshIndex = snapshot.indexCeiling
+    }
+}
+
+/// Query indexes start at 1,000,000; tree indexes stay below.
+let stableIndexLimit = 1_000_000
+
 public enum SnapshotTextStyle {
     case fullState
     case actionResult
@@ -189,12 +234,35 @@ enum SnapshotBuilder {
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
         recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
-        observation: SnapshotObservationOptions = .defaults
+        observation: SnapshotObservationOptions = .defaults,
+        stableIndices: StableIndexSeed? = nil
     ) throws -> AppSnapshot {
         try observation.validate()
         if app.name == FixtureBridge.appName, let fixtureState = try FixtureBridge.readState() {
             return buildFixtureSnapshot(app: app, state: fixtureState, observation: observation)
         }
+        var snapshot = try buildLiveSnapshot(for: app, textLimit: textLimit, treeLimits: treeLimits,
+                                             recoveryPolicy: recoveryPolicy, observation: observation,
+                                             stableIndices: stableIndices)
+        snapshot.textLimit = textLimit
+        snapshot.treeLimits = treeLimits
+        return snapshot
+    }
+
+    /// Captures only the snapshot's window, for a read-back that already has its tree.
+    static func captureScreenshot(of snapshot: AppSnapshot) -> ScreenshotEncodingResult? {
+        guard snapshot.mode == .accessibility, let windowID = snapshot.targetWindowID else { return nil }
+        return WindowCapture.resolve(for: snapshot.app.pid, exactWindowID: windowID, capture: true)?.screenshotResult()
+    }
+
+    private static func buildLiveSnapshot(
+        for app: RunningAppDescriptor,
+        textLimit: SnapshotTextLimit,
+        treeLimits: AccessibilityTreeLimits,
+        recoveryPolicy: SnapshotRecoveryPolicy,
+        observation: SnapshotObservationOptions,
+        stableIndices: StableIndexSeed?
+    ) throws -> AppSnapshot {
 
         try requireUsableComputerUseSession()
 
@@ -259,7 +327,8 @@ enum SnapshotBuilder {
             textLimit: textLimit,
             treeLimits: treeLimits,
             lazyWebAccessibility: lazyWebAccessibility,
-            observation: observation
+            observation: observation,
+            stableIndices: stableIndices
         )
     }
 
@@ -274,7 +343,8 @@ enum SnapshotBuilder {
         textLimit: SnapshotTextLimit,
         treeLimits: AccessibilityTreeLimits,
         lazyWebAccessibility: Bool,
-        observation: SnapshotObservationOptions
+        observation: SnapshotObservationOptions,
+        stableIndices: StableIndexSeed?
     ) -> AppSnapshot {
         let windowBounds = windowCapture.bounds
         let screenshot = observation.includeScreenshot ? windowCapture.screenshotResult()
@@ -294,7 +364,8 @@ enum SnapshotBuilder {
             windowBounds: windowBounds,
             focusedElement: focusedElement,
             textLimit: textLimit,
-            treeLimits: treeLimits
+            treeLimits: treeLimits,
+            stableIndices: stableIndices
         )
 
         var renderer = TreeRenderer(context: context)
@@ -344,13 +415,15 @@ enum SnapshotBuilder {
             screenshotData: screenshotData,
             mode: .accessibility,
             treeLines: treeLines,
+            treeLineIndices: renderer.lineIndices + (occlusionNote == nil ? [] : [nil]),
             focusedSummary: renderer.focusedSummary,
             focusedElement: focusedElement,
             selectedText: selectedText,
             windowElement: rootElement,
             elements: renderer.records,
             screenshotNote: screenshot.note,
-            observation: observation
+            observation: observation,
+            nextFreshIndex: renderer.nextFreshIndex
         )
     }
 
@@ -497,6 +570,7 @@ enum SnapshotBuilder {
     static func buildFixtureSnapshot(app: RunningAppDescriptor, state: FixtureAppState,
                                      observation: SnapshotObservationOptions = .defaults) -> AppSnapshot {
         var lines: [String] = []
+        var lineIndices: [Int?] = []
 
         var records: [Int: ElementRecord] = [:]
         let focusedIdentifier = state.focusedIdentifier
@@ -507,6 +581,7 @@ enum SnapshotBuilder {
             let valueSegment = element.value.map { " Value: \($0)" } ?? ""
             let actionsSegment = element.actions.isEmpty ? "" : " Secondary Actions: \(element.actions.joined(separator: ", "))"
             let focusSegment = focusedIdentifier == element.identifier ? " (focused)" : ""
+            lineIndices.append(element.index)
             lines.append("\(String(repeating: "    ", count: element.index == 0 ? 0 : 1))\(element.index) \(element.role)\(titleSegment)\(focusSegment) ID: \(element.identifier)\(valueSegment)\(actionsSegment) Frame: \(element.frame.cgRect.renderedLocalFrame)")
 
             let record = ElementRecord(
@@ -534,6 +609,7 @@ enum SnapshotBuilder {
             screenshotData: nil,
             mode: .fixture,
             treeLines: lines,
+            treeLineIndices: lineIndices,
             focusedSummary: focusedSummary,
             focusedElement: nil,
             selectedText: observation.includeAX ? state.selectedText : nil,
@@ -859,19 +935,43 @@ private struct RenderContext {
     let focusedElement: AXUIElement?
     let textLimit: SnapshotTextLimit
     let treeLimits: AccessibilityTreeLimits
+    let stableIndices: StableIndexSeed?
 }
 
 private struct TreeRenderer {
     let context: RenderContext
     var hasWebArea = false
+    /// Rendered node count; equals the next index unless stable indices are in use.
     var nextIndex = 0
-    var lines: [String] = []
+    var nextFreshIndex: Int?
+    private var issuedIndices = Set<Int>()
+    private(set) var lines: [String] = []
+    private(set) var lineIndices: [Int?] = []
     var records: [Int: ElementRecord] = [:]
     var identifierIndex: [String: String] = [:]
     var focusedSummary: String?
 
     init(context: RenderContext) {
         self.context = context
+        nextFreshIndex = context.stableIndices?.nextFreshIndex
+    }
+
+    private mutating func appendLine(_ line: String, index: Int?) {
+        lines.append(line)
+        lineIndices.append(index)
+    }
+
+    private mutating func allocateIndex(for element: AXUIElement, synthetic: Bool) -> Int {
+        defer { nextIndex += 1 }
+        guard let seed = context.stableIndices, let fresh = nextFreshIndex else {
+            return nextIndex
+        }
+        let known = synthetic ? seed.syntheticIndexByElement[element] : seed.indexByElement[element]
+        if let known, issuedIndices.insert(known).inserted {
+            return known
+        }
+        nextFreshIndex = fresh + 1
+        return fresh
     }
 
     mutating func render(_ root: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {
@@ -883,8 +983,6 @@ private struct TreeRenderer {
             return
         }
         let nextAncestors = ancestors + [root]
-
-        let index = nextIndex
 
         let role = stringValue(of: root, attribute: kAXRoleAttribute) ?? "AXUnknown"
         if role == axWebAreaRole {
@@ -989,7 +1087,7 @@ private struct TreeRenderer {
             return
         }
 
-        nextIndex += 1
+        let index = allocateIndex(for: root, synthetic: false)
 
         let traitsSegment = traits.isEmpty ? "" : " (\(traits.joined(separator: ", ")))"
         let titleSegment = displayTitle.map { " \($0)" } ?? ""
@@ -1033,7 +1131,7 @@ private struct TreeRenderer {
         let linePrefix = renderedRoleText.isEmpty ? "\(index)" : "\(index) \(renderedRoleText)"
 
         let lineBody = "\(linePrefix)\(traitsSegment)\(titleSegment)\(rowSummarySegment)\(labelSegment)\(helpSegment)\(urlSegment)\(identifierSegment)\(valueSegment)\(placeholderSegment)\(frameSegment)"
-        lines.append("\(String(repeating: "\t", count: depth))\(lineBody)\(actionsSegment)")
+        appendLine("\(String(repeating: "\t", count: depth))\(lineBody)\(actionsSegment)", index: index)
 
         let record = ElementRecord(
             index: index,
@@ -1056,7 +1154,7 @@ private struct TreeRenderer {
 
         if role == kAXRowRole as String, boolValue(of: root, attribute: kAXSelectedAttribute) != true {
             for text in Array(rowTexts.dropFirst()) {
-                lines.append(text)
+                appendLine(text, index: nil)
             }
             return
         }
@@ -1083,9 +1181,8 @@ private struct TreeRenderer {
             return
         }
 
-        let index = nextIndex
-        nextIndex += 1
-        lines.append("\(String(repeating: "\t", count: depth))\(index) text \(text)")
+        let index = allocateIndex(for: element, synthetic: true)
+        appendLine("\(String(repeating: "\t", count: depth))\(index) text \(text)", index: index)
 
         records[index] = ElementRecord(
             index: index,
@@ -2316,7 +2413,7 @@ private func displayIdentifier(_ value: String?) -> String? {
     return value
 }
 
-private func displayWindowTitle(_ value: String?, appName: String) -> String {
+func displayWindowTitle(_ value: String?, appName: String) -> String {
     guard let value, !value.isEmpty else {
         return appName
     }
@@ -2328,7 +2425,7 @@ private func displayWindowTitle(_ value: String?, appName: String) -> String {
     return value
 }
 
-private func quoted(_ value: String) -> String {
+func quoted(_ value: String) -> String {
     "\"\(value)\""
 }
 

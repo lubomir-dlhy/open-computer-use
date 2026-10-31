@@ -1,20 +1,13 @@
 import Foundation
 
 let computerUseServerInstructions = """
-Computer Use tools let you interact with macOS apps by performing UI actions.
+Computer Use tools operate macOS apps in the background, so the user can keep using their computer. Don't disrupt their session, for example by overwriting the clipboard, unless they ask. If an app has a dedicated plugin or skill that can do the task, prefer it.
 
-Some apps might have a separate dedicated plugin or skill. You may want to use that plugin or skill instead of Computer Use when it seems like a good fit for the task. While the separate plugin or skill may not expose every feature in the app, if the plugin can perform the task with its available features, prefer it. If the needed capability is not exposed there, use Computer Use may be appropriate for the missing interaction.
+Call `get_app_state` at the start of every turn before acting; the session stops after each assistant turn. If a tool is missing, surface it with tool_search.
 
-Begin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. Codex will automatically stop the session after each assistant turn, so this step is required before interacting with apps in a new assistant turn.
+An action returns only what changed since the state you last saw: `~` changed, `+` added (`(in N)` names the parent), `-` removed. Element indices are stable, so ones you already know stay valid. Every action also takes state ("diff" by default, "full" for the whole tree, "none" for just ok), screenshot (true attaches one), wait_for (text to wait for in the tree; "!text" waits until it is gone) and wait_timeout (seconds, default 5). Use `batch` for several steps in one call, and `get_app_state` for the full picture.
 
-The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, set_value, select_text, and query. If any of these are not available in your environment, use tool_search to surface one before calling any Computer Use action tools.
-
-Computer Use tools allow you to use the user's apps in the background, so while you're using an app, the user can continue to use other apps on their computer. Avoid doing anything that would disrupt the user's active session, such as overwriting the contents of their clipboard, unless they asked you to!
-
-After each action, use the action result or fetch the latest state to verify the UI changed as expected.
-Prefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Note that element indices are the sequential integers from the app state's accessibility tree.
-Avoid falling back to AppleScript during a computer use session. Prefer Computer Use tools as much as possible to complete tasks.
-Ask the user before taking destructive or externally visible actions such as sending, deleting, or purchasing. If helpful, you can ask follow-up questions before taking action to make sure you’re understanding the user’s request correctly.
+Prefer element indices to coordinates. Avoid AppleScript. Ask before destructive or externally visible actions such as sending, deleting or purchasing.
 """
 
 public final class StdioMCPServer {

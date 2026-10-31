@@ -617,9 +617,20 @@ func shouldPreferContainingWebRowAXClickCandidate(
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
     private var invalidatedSnapshotAliases: Set<String> = []
-    // Read per call: the app agent applies the caller's OPEN_COMPUTER_USE_* variables
-    // for the duration of each request.
-    private var actionReadBack: Bool { actionReadBackEnabled(environment: ProcessInfo.processInfo.environment) }
+    // Defaults are read per call: the app agent applies the caller's OPEN_COMPUTER_USE_*
+    // variables for the duration of each request.
+    private var callObservation: ActionObservation?
+    var actionObservation: ActionObservation {
+        callObservation ?? .defaults(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Runs one tool call with explicit action-result options.
+    public func withActionObservation<T>(_ observation: ActionObservation?, _ body: () throws -> T) rethrows -> T {
+        let previous = callObservation
+        callObservation = observation ?? previous
+        defer { callObservation = previous }
+        return try body()
+    }
 
     // Targeted-lookup registry. `query` stores each match here keyed by a high,
     // monotonic element index; the existing element actions resolve that index to
@@ -637,24 +648,188 @@ public final class ComputerUseService {
 
     public init() {}
 
-    /// An action's result reads the window back, so the app gets a beat to redraw
-    /// first. Without read-back nothing is read, so there is no wait.
-    private func pauseBeforeReadBack(_ interval: TimeInterval) {
-        guard actionReadBack else {
-            return
-        }
-
-        Thread.sleep(forTimeInterval: interval)
-    }
-
-    /// The result an action returns: the after-action snapshot, or a short status
-    /// when read-back is off.
-    private func actionResult(for query: String, recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation) throws -> ToolCallResult {
-        guard actionReadBack else {
+    /// The result an action returns, read once the window has settled. A diff
+    /// compares against `baseline`, by default the state the agent last saw.
+    private func actionResult(
+        for query: String,
+        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
+        baseline: AppSnapshot? = nil
+    ) throws -> ToolCallResult {
+        let options = actionObservation
+        guard options.readsBack else {
             return .text("ok")
         }
 
-        return snapshotResult(for: try refreshSnapshot(for: query, recoveryPolicy: recoveryPolicy), style: .actionResult)
+        let stored = snapshotsByApp[query.lowercased()].flatMap { $0.observation.includeAX ? $0 : nil }
+        let previous = baseline ?? stored
+        // Only a full result renumbers; otherwise indices the agent holds stay valid.
+        let seed = options.state == .full ? nil : stored.flatMap { $0.mode == .accessibility ? StableIndexSeed(previous: $0) : nil }
+        let (settled, waitMet) = try settledSnapshot(for: query, previous: previous, recoveryPolicy: recoveryPolicy,
+                                                      seed: seed, options: options)
+        var snapshot = settled
+        // Fixture coordinates resolve by identifier, so they never need a screenshot.
+        snapshot.observation.includeScreenshot = snapshot.mode == .fixture
+        if options.screenshot, let capture = SnapshotBuilder.captureScreenshot(of: snapshot) {
+            snapshot.screenshotData = capture.data
+            snapshot.screenshotNote = capture.note
+            snapshot.observation.includeScreenshot = true
+        } else {
+            snapshot.screenshotNote = nil
+            if let previous, let size = screenshotPixelSize(snapshot: previous),
+               previous.windowBounds?.size == snapshot.windowBounds?.size {
+                snapshot.carriedScreenshotPixelSize = size
+            }
+        }
+        rememberSnapshot(snapshot, for: query)
+
+        var text: String
+        switch options.state {
+        case .full:
+            text = snapshot.renderedText(style: .actionResult)
+        case .none:
+            text = "ok"
+        case .diff:
+            text = previous.map { renderedDiff(from: $0, to: snapshot) } ?? snapshot.renderedText(style: .actionResult)
+        }
+        if let waitFor = options.waitFor, waitMet == false {
+            text += "\nwait_for \(quoted(waitFor)) not met after \(String(format: "%g", options.waitTimeout))s."
+        }
+
+        var content = [ToolResultContentItem.text(text)]
+        if options.screenshot {
+            if let note = snapshot.screenshotNote { content.append(.text(note)) }
+            if let data = snapshot.screenshotData { content.append(.screenshotImage(data)) }
+        }
+        return ToolCallResult(content: content)
+    }
+
+    /// Reads the tree until it stops changing instead of sleeping a fixed time:
+    /// returns as soon as two reads agree after a change, or when nothing has
+    /// changed for a short window. A `wait_for` condition overrides both.
+    private func settledSnapshot(
+        for query: String,
+        previous: AppSnapshot?,
+        recoveryPolicy: SnapshotRecoveryPolicy,
+        seed: StableIndexSeed?,
+        options: ActionObservation
+    ) throws -> (AppSnapshot, waitMet: Bool?) {
+        let pollInterval: TimeInterval = 0.03
+        let unchangedWindow: TimeInterval = 0.15
+        let maxSettle: TimeInterval = 1.2
+        // Large trees cost more per read than a second confirmation is worth.
+        let confirmReadBudget: TimeInterval = 0.12
+        let condition = WaitCondition(options.waitFor)
+        let app = try AppDiscovery.resolve(query)
+        let start = TimingLog.now()
+        var last: AppSnapshot?
+
+        while true {
+            let readStart = TimingLog.now()
+            let snapshot = try SnapshotBuilder.build(
+                for: app,
+                textLimit: previous?.textLimit ?? .defaults,
+                treeLimits: previous?.treeLimits ?? .defaults,
+                recoveryPolicy: recoveryPolicy,
+                observation: SnapshotObservationOptions(includeAX: true, includeScreenshot: false),
+                stableIndices: seed
+            )
+            let now = TimingLog.now()
+            let elapsed = now - start
+            defer { last = snapshot }
+
+            if let condition {
+                if condition.isSatisfied(by: snapshot) {
+                    TimingLog.log("action.settle(wait_for)", since: start)
+                    return (snapshot, true)
+                }
+                if elapsed >= min(options.waitTimeout, ActionObservation.maxWaitTimeout) {
+                    return (snapshot, false)
+                }
+            } else {
+                let changed = previous.map { !sameObservedState($0, snapshot) } ?? true
+                let stable = last.map { sameObservedState($0, snapshot) } ?? false
+                if (changed && (stable || now - readStart > confirmReadBudget || elapsed >= maxSettle))
+                    || (!changed && elapsed >= unchangedWindow) {
+                    TimingLog.log("action.settle", since: start)
+                    return (snapshot, nil)
+                }
+            }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+    }
+
+    private func sameObservedState(_ lhs: AppSnapshot, _ rhs: AppSnapshot) -> Bool {
+        lhs.treeLines == rhs.treeLines && lhs.windowTitle == rhs.windowTitle
+            && lhs.focusedSummary == rhs.focusedSummary && lhs.selectedText == rhs.selectedText
+    }
+
+    private func renderedDiff(from previous: AppSnapshot, to snapshot: AppSnapshot) -> String {
+        let diff = TreeDiff(
+            before: treeDiffEntries(lines: previous.treeLines, indices: previous.treeLineIndices),
+            after: treeDiffEntries(lines: snapshot.treeLines, indices: snapshot.treeLineIndices)
+        )
+        let full = snapshot.renderedText(style: .actionResult)
+        var lines: [String] = []
+        if previous.windowTitle != snapshot.windowTitle || previous.targetWindowID != snapshot.targetWindowID {
+            lines.append("Window: \(quoted(displayWindowTitle(snapshot.windowTitle, appName: snapshot.app.name))).")
+        }
+        if diff.isEmpty {
+            lines.append("No accessibility tree change.")
+        } else {
+            lines.append(contentsOf: diff.rendered())
+        }
+        if snapshot.selectedText != previous.selectedText, let selectedText = snapshot.selectedText, !selectedText.isEmpty {
+            lines.append("Selected text: [\(selectedText)]")
+        } else if snapshot.focusedSummary != previous.focusedSummary, let focusedSummary = snapshot.focusedSummary {
+            lines.append("Focused: \(focusedSummary)")
+        }
+        let text = lines.joined(separator: "\n")
+        // A diff that is nearly the whole tree reads worse than the tree itself.
+        return text.count * 5 >= full.count * 4 ? full : text
+    }
+
+    /// Runs element and keyboard actions back to back without reading the window
+    /// between them, then reports one result against the state before the batch.
+    /// Indices in every step refer to that state. Stops at the first failing step.
+    public func runBatch(
+        app query: String,
+        steps: [(tool: String, observation: ActionObservation, run: () throws -> ToolCallResult)]
+    ) throws -> ToolCallResult {
+        let baseline = snapshotsByApp[query.lowercased()]
+        var failure: String?
+        var completed = 0
+        var notes: [String] = []
+        for (offset, step) in steps.enumerated() {
+            do {
+                let result = try withActionObservation(step.observation) { try step.run() }
+                if result.isError {
+                    failure = "step \(offset + 1) (\(step.tool)) failed: \(result.textContent)"
+                } else if result.textContent != "ok" {
+                    let text = result.textContent.hasPrefix("ok\n") ? String(result.textContent.dropFirst(3)) : result.textContent
+                    notes.append("step \(offset + 1): \(text)")
+                }
+            } catch {
+                failure = "step \(offset + 1) (\(step.tool)) failed: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))"
+            }
+            if failure != nil { break }
+            completed += 1
+        }
+
+        var header = failure.map { ["Ran \(completed) of \(steps.count) steps; \($0)"] } ?? ["Ran \(steps.count) steps."]
+        header += notes
+        var content: [ToolResultContentItem] = []
+        do {
+            let readBack = try actionResult(for: query, recoveryPolicy: .readOnly, baseline: baseline)
+            // The read-back text always comes first; fold the step summary into it.
+            content = Array(readBack.content.dropFirst())
+            if let text = readBack.primaryText, text != "ok" {
+                header.append(text)
+            }
+        } catch {
+            header.append("Could not read the window back: \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+        }
+        content.insert(.text(header.joined(separator: "\n")), at: 0)
+        return ToolCallResult(content: content, isError: failure != nil)
     }
 
     public func listApps() -> ToolCallResult {
@@ -731,7 +906,7 @@ public final class ComputerUseService {
 
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
-        if elementIndex == nil, !snapshot.observation.includeScreenshot {
+        if elementIndex == nil, !snapshot.acceptsScreenshotCoordinates {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
         }
         if snapshot.mode == .fixture {
@@ -939,7 +1114,6 @@ public final class ComputerUseService {
             throw ComputerUseError.message("AXUIElementPerformAction failed with \(result.rawValue)")
         }
 
-        pauseBeforeReadBack(0.15)
         return try actionResult(for: query)
     }
 
@@ -998,7 +1172,7 @@ public final class ComputerUseService {
         modifiers: CGEventFlags = []
     ) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
-        guard snapshot.observation.includeScreenshot else {
+        guard snapshot.acceptsScreenshotCoordinates else {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
         }
         if snapshot.mode == .fixture {
@@ -1037,14 +1211,10 @@ public final class ComputerUseService {
         if keyMethod == .skyKey {
             let target = try skyKeyTarget(for: snapshot)
             try InputSimulation.typeTextWithSkyLight(text, windowID: target.windowID, pid: target.pid)
-            return snapshotResult(
-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
-                style: .actionResult
-            )
+            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
-            pauseBeforeReadBack(0.1)
             return try actionResult(for: query)
         }
 
@@ -1068,10 +1238,7 @@ public final class ComputerUseService {
         if keyMethod == .skyKey {
             let target = try skyKeyTarget(for: snapshot)
             try InputSimulation.pressKeyWithSkyLight(key, windowID: target.windowID, pid: target.pid)
-            return snapshotResult(
-                for: try refreshSnapshot(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod)),
-                style: .actionResult
-            )
+            return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
         }
 
         try InputSimulation.pressKey(key, pid: snapshot.app.pid)
@@ -1126,12 +1293,10 @@ public final class ComputerUseService {
 
         do {
             try requireUsableComputerUseSession()
-            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
+            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, setValuePayload(value, for: element))
             guard result == .success else {
                 throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
             }
-
-            pauseBeforeReadBack(0.1)
         } catch {
             settleVisualCursor(at: cursorTarget)
             throw error
@@ -1505,7 +1670,6 @@ public final class ComputerUseService {
 
         switch result {
         case .success:
-            pauseBeforeReadBack(0.15)
             return true
         case .failure, .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
             return false
@@ -1551,14 +1715,12 @@ public final class ComputerUseService {
         if preferContainingWebRowAXClick,
            try performContainingWebRowClick(for: record, snapshot: snapshot, button: button, clickCount: clickCount)
         {
-            pauseBeforeReadBack(0.15)
             return true
         }
 
         if !preferContainingWebRowAXClick {
             if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
                 debugClickDecision("handled by preferred target \(clickDebugDescription(record))")
-                pauseBeforeReadBack(0.15)
                 return true
             }
 
@@ -1567,7 +1729,6 @@ public final class ComputerUseService {
             where clickPoint.map({ candidate.localFrame?.contains($0) ?? false }) ?? true {
                 if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                     debugClickDecision("handled by descendant \(clickDebugDescription(candidate))")
-                    pauseBeforeReadBack(0.15)
                     return true
                 }
             }
@@ -1582,7 +1743,6 @@ public final class ComputerUseService {
                        try performPreferredClick(on: hitRecord, button: button, clickCount: clickCount)
                     {
                         debugClickDecision("handled by hit record \(clickDebugDescription(hitRecord))")
-                        pauseBeforeReadBack(0.15)
                         return true
                     }
 
@@ -1597,7 +1757,6 @@ public final class ComputerUseService {
                         ) {
                             if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
                                 debugClickDecision("handled by hit descendant \(clickDebugDescription(candidate))")
-                                pauseBeforeReadBack(0.15)
                                 return true
                             }
                         }
@@ -1619,7 +1778,6 @@ public final class ComputerUseService {
 
         if try activateClickTarget(element: element, availableActions: record.rawActions) {
             debugClickDecision("handled by activation fallback \(clickDebugDescription(record))")
-            pauseBeforeReadBack(0.15)
             return true
         }
 
@@ -1687,6 +1845,18 @@ public final class ComputerUseService {
         var settable: DarwinBoolean = false
         let result = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
         return result == .success && settable.boolValue
+    }
+
+    /// Sliders and steppers reject a string value; send a number when the element holds one.
+    private func setValuePayload(_ value: String, for element: AXUIElement) -> CFTypeRef {
+        var current: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &current) == .success,
+              let current, CFGetTypeID(current) == CFNumberGetTypeID(),
+              let number = Double(value.trimmingCharacters(in: .whitespaces))
+        else {
+            return value as CFString
+        }
+        return NSNumber(value: number)
     }
 
     private func isSettableForSetValue(element: AXUIElement, attribute: String) throws -> Bool {
@@ -1951,12 +2121,23 @@ public final class ComputerUseService {
         }
     }
 
-    private func typeTextBySettingFocusedValueIfAvailable(_ text: String, in snapshot: AppSnapshot) throws -> Bool {
-        guard let element = snapshot.focusedElement else {
-            return false
+    /// The app's focus now: the stored snapshot predates any action run without read-back.
+    private func liveFocusedElement(in snapshot: AppSnapshot) -> AXUIElement? {
+        var value: CFTypeRef?
+        let appElement = AXUIElementCreateApplication(snapshot.app.pid)
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
+            return snapshot.focusedElement
         }
+        return (value as! AXUIElement)
+    }
 
-        guard try isSettableForSetValue(element: element, attribute: kAXValueAttribute) else {
+    private func typeTextBySettingFocusedValueIfAvailable(_ text: String, in snapshot: AppSnapshot) throws -> Bool {
+        // A focus that cannot report settability falls through to keyboard input.
+        guard let element = liveFocusedElement(in: snapshot),
+              (try? isSettableForSetValue(element: element, attribute: kAXValueAttribute)) == true
+        else {
             return false
         }
 
@@ -1974,7 +2155,7 @@ public final class ComputerUseService {
     }
 
     private func canTypeTextUsingKeyboardFallback(in snapshot: AppSnapshot) throws -> Bool {
-        guard let element = snapshot.focusedElement else {
+        guard let element = liveFocusedElement(in: snapshot) else {
             return false
         }
 
@@ -1985,7 +2166,7 @@ public final class ComputerUseService {
         return canUseKeyboardTextFallback(
             role: role,
             roleDescription: roleDescription,
-            isValueSettable: try isSettableForSetValue(element: element, attribute: kAXValueAttribute)
+            isValueSettable: (try? isSettableForSetValue(element: element, attribute: kAXValueAttribute)) ?? false
         )
     }
 
@@ -2203,7 +2384,7 @@ public final class ComputerUseService {
     }
 
     private func screenshotPixelToWindowPointInSnapshot(snapshot: AppSnapshot, point: CGPoint) throws -> CGPoint {
-        if snapshot.screenshotData == nil, let note = snapshot.screenshotNote {
+        if snapshot.screenshotData == nil, snapshot.carriedScreenshotPixelSize == nil, let note = snapshot.screenshotNote {
             throw ComputerUseError.stateUnavailable(note + "; coordinate input requires a delivered screenshot")
         }
         return screenshotPixelToWindowPoint(
@@ -2214,6 +2395,9 @@ public final class ComputerUseService {
     }
 
     private func screenshotPixelSize(snapshot: AppSnapshot) -> CGSize? {
+        if snapshot.screenshotData == nil, let carried = snapshot.carriedScreenshotPixelSize {
+            return carried
+        }
         guard
             let screenshotData = snapshot.screenshotData,
             let imageSource = CGImageSourceCreateWithData(screenshotData as CFData, nil),
@@ -2281,7 +2465,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueueOnMain(startsMove: true) {
             SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window, anchor: target.anchor)
         }
     }
@@ -2291,7 +2475,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueueOnMain(startsMove: false) {
             SoftwareCursorOverlay.settle(at: target.point, in: target.window, anchor: target.anchor)
         }
     }
@@ -2301,7 +2485,7 @@ public final class ComputerUseService {
             return
         }
 
-        VisualCursorSupport.performOnMain {
+        VisualCursorSupport.enqueueOnMain(startsMove: false) {
             SoftwareCursorOverlay.pulseClick(
                 at: target.point,
                 clickCount: clickCount,
