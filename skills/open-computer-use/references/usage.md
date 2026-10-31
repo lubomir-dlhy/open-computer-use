@@ -113,7 +113,7 @@ inferring support from a command being present in help.
 
 ## Action Results (macOS)
 
-macOS actions return only what changed since the state the agent last saw. `~` is a changed element, `+` an added one (`(in N)` names the parent), and `-` a removed subtree. Element indices the agent already has stay valid. Each action and `batch` also accept:
+macOS actions return only what changed since the state the agent last saw. `~` is a changed element, `+` an added one (`(in N)` names the parent), and `-` a removed subtree. Element indices the agent already has stay valid until the next `get_app_state`, which renumbers the tree. Each action and `batch` also accept:
 
 - `state`: `diff` (default), `full` (the whole tree, the old result) or `none` (`ok`).
 - `screenshot: true` to attach a screenshot. Off by default; call `get_app_state` when you need one.

@@ -676,6 +676,7 @@ public final class ComputerUseService {
         } else {
             snapshot.screenshotNote = nil
             if let previous, let size = screenshotPixelSize(snapshot: previous),
+               previous.targetWindowID == snapshot.targetWindowID,
                previous.windowBounds?.size == snapshot.windowBounds?.size {
                 snapshot.carriedScreenshotPixelSize = size
             }

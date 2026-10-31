@@ -130,7 +130,9 @@ struct TreeDiff {
         var lines: [String] = []
         let addedIndices = Set(updates.filter(\.isAdded).map(\.entry.index))
         var runRootDepth = 0
-        for (entry, isAdded) in updates.prefix(maxEntries) {
+        // Removals keep a share of the budget so a large update cannot hide them all.
+        let updateBudget = maxEntries - min(removed.count, maxEntries / 5)
+        for (entry, isAdded) in updates.prefix(updateBudget) {
             guard isAdded else {
                 lines.append("~ \(entry.body)")
                 continue
@@ -141,7 +143,7 @@ struct TreeDiff {
             let context = parentIsAdded ? "" : entry.parent.map { " (in \($0))" } ?? ""
             lines.append("+ \(indent)\(entry.body)\(context)")
         }
-        for (entry, descendants) in removed.prefix(max(0, maxEntries - updates.count)) {
+        for (entry, descendants) in removed.prefix(maxEntries - min(updates.count, updateBudget)) {
             let firstLine = entry.body.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? entry.body
             lines.append("- \(firstLine)\(descendants > 0 ? " (and \(descendants) inside)" : "")")
         }

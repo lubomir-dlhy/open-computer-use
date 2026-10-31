@@ -56,6 +56,19 @@ final class ActionResultTests: XCTestCase {
         XCTAssertEqual(lines.last, "… 7 more changes; call get_app_state for the full tree.")
     }
 
+    func testRemovalsKeepRoomInALongDiff() {
+        let before = ["0 window"] + (1...10).map { "\t\($0) text Old \($0)" }
+        let after = ["0 window"] + (100..<120).map { "\t\($0) text New \($0)" }
+        let diff = TreeDiff(
+            before: treeDiffEntries(lines: before, indices: [0] + Array(1...10)),
+            after: treeDiffEntries(lines: after, indices: [0] + Array(100..<120))
+        )
+        let lines = diff.rendered(maxEntries: 10)
+        XCTAssertEqual(lines.filter { $0.hasPrefix("+ ") }.count, 8)
+        XCTAssertEqual(lines.filter { $0.hasPrefix("- ") }.count, 2)
+        XCTAssertEqual(lines.last, "… 20 more changes; call get_app_state for the full tree.")
+    }
+
     func testEntriesFallBackToLeadingIndexWithoutLineIndices() {
         let entries = treeDiffEntries(lines: ["0 window", "    1 button OK"], indices: [])
         XCTAssertEqual(entries.map(\.index), [0, 1])

@@ -15,7 +15,7 @@ Focused: 2 text field Name, Value: Ada
 - `~` is an element whose line changed, `+` an added element (`(in N)` names the parent of a new subtree; deeper lines are indented), and `-` the root of a removed subtree.
 - `Window: "…"` appears when the target window changed. `Selected text:` or `Focused:` appears when it changed.
 - `No accessibility tree change.` means the read-back matched the state the agent last saw.
-- If the diff would be nearly as large as the tree (for example after a navigation), the whole tree is returned instead. Diffs longer than 150 entries are cut off with a pointer to `get_app_state`.
+- If the diff would be nearly as large as the tree (for example after a navigation), the whole tree is returned instead. Diffs longer than 150 entries are cut off with a pointer to `get_app_state`; removals keep up to a fifth of that space.
 
 ## Stable element indices
 
@@ -32,7 +32,7 @@ Every action tool, and `batch`, accepts:
 | `wait_for` | Return once this text appears in the tree (case-insensitive). `!text` waits until it is gone. |
 | `wait_timeout` | Seconds for `wait_for`, default 5, max 30. On timeout the result says the condition was not met; it is not an error. |
 
-Coordinate actions after a read-back without a screenshot keep mapping onto the last screenshot the agent saw, as long as the window size is unchanged.
+Coordinate actions after a read-back without a screenshot keep mapping onto the last screenshot the agent saw, as long as the target window and its size are unchanged.
 
 ## Batch
 

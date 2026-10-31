@@ -91,7 +91,7 @@ public enum ToolDefinitions {
         ),
         ToolDefinition(
             name: "get_app_state",
-            description: "Start an app session if needed and return the key window's accessibility tree and a screenshot. Call once per turn before acting. Later action results keep these element indices.",
+            description: "Start an app session if needed and return the key window's accessibility tree and a screenshot. Call once per turn before acting. Action results keep these element indices until the next call.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [

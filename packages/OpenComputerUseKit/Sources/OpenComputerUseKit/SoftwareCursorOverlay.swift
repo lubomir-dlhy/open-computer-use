@@ -32,6 +32,10 @@ public enum VisualCursorSupport {
             performOnMain(body)
             return
         }
+        // The app agent applies the caller's environment only until the call returns.
+        guard isEnabled else {
+            return
+        }
 
         DispatchQueue.main.async {
             MainActor.assumeIsolated {

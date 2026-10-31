@@ -5,7 +5,7 @@ Computer Use tools operate macOS apps in the background, so the user can keep us
 
 Call `get_app_state` at the start of every turn before acting; the session stops after each assistant turn. If a tool is missing, surface it with tool_search.
 
-An action returns only what changed since the state you last saw: `~` changed, `+` added (`(in N)` names the parent), `-` removed. Element indices are stable, so ones you already know stay valid. Every action also takes state ("diff" by default, "full" for the whole tree, "none" for just ok), screenshot (true attaches one), wait_for (text to wait for in the tree; "!text" waits until it is gone) and wait_timeout (seconds, default 5). Use `batch` for several steps in one call, and `get_app_state` for the full picture.
+An action returns only what changed since the state you last saw: `~` changed, `+` added (`(in N)` names the parent), `-` removed. Element indices stay stable until the next `get_app_state`, which renumbers the tree. Every action also takes state ("diff" by default, "full" for the whole tree, "none" for just ok), screenshot (true attaches one), wait_for (text to wait for in the tree; "!text" waits until it is gone) and wait_timeout (seconds, default 5). Use `batch` for several steps in one call, and `get_app_state` for the full picture.
 
 Prefer element indices to coordinates. Avoid AppleScript. Ask before destructive or externally visible actions such as sending, deleting or purchasing.
 """
