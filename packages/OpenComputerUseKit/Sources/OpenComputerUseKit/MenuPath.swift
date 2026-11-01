@@ -21,10 +21,37 @@ enum MenuPath {
             return exact
         }
         let prefixed = candidates.indices.filter { !wanted.isEmpty && candidates[$0].hasPrefix(wanted) }
-        return prefixed.count == 1 ? prefixed[0] : nil
+        // Menus repeat a title for hidden alternates (Finder lists Compress twice).
+        return Set(prefixed.map { candidates[$0] }).count == 1 ? prefixed.first : nil
     }
 
-    static func resolve(_ path: [String], appElement: AXUIElement) throws -> AXUIElement {
+    static func isEnabled(_ item: AXUIElement) -> Bool {
+        boolAttribute(item, kAXEnabledAttribute) != false
+    }
+
+    /// Controls inside menu items, such as Finder's tag colours (`Add "Red" label`),
+    /// matched by a case-insensitive word in their title or description.
+    static func pressableDescendant(matching requested: String, in items: [AXUIElement]) -> AXUIElement? {
+        let wanted = normalized(requested)
+        var found: [AXUIElement] = []
+        func visit(_ element: AXUIElement, depth: Int) {
+            let label = [stringAttribute(element, kAXTitleAttribute), stringAttribute(element, kAXDescriptionAttribute)]
+                .compactMap { $0 }.joined(separator: " ").lowercased()
+            var actions: CFArray?
+            AXUIElementCopyActionNames(element, &actions)
+            let pressable = (actions as? [String])?.contains(kAXPressAction as String) == true
+            let words = label.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+            if pressable, !wanted.isEmpty, words.contains(wanted) || label == wanted {
+                found.append(element)
+            }
+            guard depth < 4 else { return }
+            for child in elements(element, kAXChildrenAttribute) { visit(child, depth: depth + 1) }
+        }
+        for item in items { for child in elements(item, kAXChildrenAttribute) { visit(child, depth: 0) } }
+        return found.count == 1 ? found[0] : nil
+    }
+
+    static func resolve(_ path: [String], appElement: AXUIElement, requireEnabled: Bool = true) throws -> AXUIElement {
         guard !path.isEmpty else {
             throw ComputerUseError.invalidArguments("menu_path needs at least one title")
         }
@@ -43,7 +70,7 @@ enum MenuPath {
             }
             node = items[index]
         }
-        if boolAttribute(node, kAXEnabledAttribute) == false {
+        if requireEnabled, boolAttribute(node, kAXEnabledAttribute) == false {
             throw ComputerUseError.message("menu item \(path.joined(separator: " > ")) is disabled")
         }
         return node

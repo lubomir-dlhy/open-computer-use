@@ -65,8 +65,16 @@ Work without bringing apps forward or touching the user's windows:
 - **Windows:** `get_app_state` lists the app's other windows; pass `window_id` to read a specific one. Later actions
   stay on that window.
 - **Apps without a window:** `get_app_state` asks the app to show one in the background (on the agent display).
-- **Context menus:** `click` with `"mouse_button": "right"` on an element index (default `click_method`) opens its
-  menu; the menu items then appear in the result as `+` lines, so click the item by index.
+- **Context menus:** prefer one step: `click` with `element_index` and `"menu_item": "Mark as done"` opens that
+  element's context menu and chooses the item (a word of a label also works, e.g. `"Red"` for Finder's red tag
+  button). A right-click (`"mouse_button": "right"`) instead leaves the menu open, and an open menu captures the
+  user's typing until you pick an item.
+- **Double-click:** `click` with `"click_count": 2` on an element index sends a real background double-click
+  (opens items, starts in-place editing in web apps such as TodoMVC).
+- **Lists and Finder:** clicking a row selects it; add `"modifiers": ["cmd"]` to add a row to the selection.
+  With files selected, `menu_item` on a selected file's name field reaches Finder's context menu, e.g.
+  `"Compress"`; Finder's menu bar commands are disabled while it is in the background. Moving files and
+  committing a rename are not available in the background.
 - **Keys:** `press_key` delivers through SkyLight while the app is in the background, so shortcuts and `Return`
   reach Chromium and AppKit menus. Do not force `click_method: "app_post"`/`"sky_click"` on elements that have an
   index; the default tries accessibility first.

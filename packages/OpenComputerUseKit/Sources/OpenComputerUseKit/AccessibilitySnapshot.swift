@@ -322,7 +322,11 @@ enum SnapshotBuilder {
         let windows = appWindows(appElement: appElement)
         if let windowPin, let pinned = windows.first(where: { $0.windowID == windowPin.windowID })?.element {
             let focusedID = focusedWindow.flatMap { SkyLightSPI.shared.windowID(for: $0) }
-            if focusedID != windowPin.windowID, windowPin.followsFocus(to: focusedID) == false {
+            // A background app's new window can become main without becoming focused.
+            let main = usableWindowElement(from: copyElement(appElement, attribute: kAXMainWindowAttribute))
+            if let main, let mainID = SkyLightSPI.shared.windowID(for: main), windowPin.followsFocus(to: mainID) {
+                focusedWindow = main
+            } else if focusedID != windowPin.windowID, windowPin.followsFocus(to: focusedID) == false {
                 focusedWindow = pinned
             }
         }

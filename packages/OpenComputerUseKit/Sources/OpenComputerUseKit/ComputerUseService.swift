@@ -87,8 +87,8 @@ func validateSkyClickArguments(
     modifiers: CGEventFlags = []
 ) throws {
     guard method == .skyClick else {
-        if !modifiers.isEmpty {
-            throw ComputerUseError.message("modifiers are only supported with click_method 'sky_click'")
+        if !modifiers.isEmpty, method != .auto {
+            throw ComputerUseError.message("modifiers are only supported with click_method 'sky_click' or 'auto'")
         }
         return
     }
@@ -895,6 +895,31 @@ public final class ComputerUseService {
         return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
     }
 
+    /// Selects the outline or table row an element belongs to (Finder lists, Mail
+    /// message lists); with `extending`, adds it to the current selection.
+    private func selectTableRow(containing element: AXUIElement?, extending: Bool) -> Bool {
+        var current = element
+        for _ in 0..<5 {
+            guard let node = current else { return false }
+            if stringValue(of: node, attribute: kAXRoleAttribute) == kAXRowRole as String,
+               let table = copyParent(of: node),
+               [kAXOutlineRole as String, kAXTableRole as String].contains(stringValue(of: table, attribute: kAXRoleAttribute) ?? ""),
+               isSettable(element: table, attribute: kAXSelectedRowsAttribute) {
+                var rows = [node]
+                if extending {
+                    var value: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(table, kAXSelectedRowsAttribute as CFString, &value) == .success,
+                       let selected = value as? [AXUIElement] {
+                        rows = selected.filter { !CFEqual($0, node) } + [node]
+                    }
+                }
+                return AXUIElementSetAttributeValue(table, kAXSelectedRowsAttribute as CFString, rows as CFArray) == .success
+            }
+            current = copyParent(of: node)
+        }
+        return false
+    }
+
     /// Pressing twice through accessibility is not a double-click: "double-click to
     /// open/edit" handlers need mouse events carrying the click count.
     private func performMultiClick(
@@ -937,7 +962,7 @@ public final class ComputerUseService {
         let deadline = Date().addingTimeInterval(1)
         var menu: AXUIElement?
         while menu == nil, Date() < deadline {
-            menu = copyChildren(of: element).first { stringValue(of: $0, attribute: kAXRoleAttribute) == kAXMenuRole as String }
+            menu = openContextMenu(near: element)
             if menu == nil { Thread.sleep(forTimeInterval: 0.03) }
         }
         guard let menu else {
@@ -945,12 +970,12 @@ public final class ComputerUseService {
         }
         let items = copyChildren(of: menu)
         let titles = items.map { stringValue(of: $0, attribute: kAXTitleAttribute) ?? "" }
-        guard let index = MenuPath.match(item, in: titles) else {
+        guard let target = MenuPath.match(item, in: titles).map({ items[$0] }) ?? MenuPath.pressableDescendant(matching: item, in: items) else {
             _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
             throw ComputerUseError.invalidArguments("context menu has no unique item \(item.debugDescription). Items: \(titles.filter { !$0.isEmpty }.joined(separator: ", "))")
         }
-        AXUIElementSetMessagingTimeout(items[index], 1)
-        let result = AXUIElementPerformAction(items[index], kAXPressAction as CFString)
+        AXUIElementSetMessagingTimeout(target, 1)
+        let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
         guard result == .success || result == .cannotComplete else {
             _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
             throw ComputerUseError.message("Pressing context menu item \(item) failed with \(result.rawValue)")
@@ -958,11 +983,46 @@ public final class ComputerUseService {
         return try actionResult(for: query, recoveryPolicy: .readOnly)
     }
 
+    /// A context menu hangs off the element it was shown for, or off an ancestor
+    /// such as the outline of a Finder row.
+    private func openContextMenu(near element: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement? = element
+        for _ in 0..<6 {
+            guard let node = current else { return nil }
+            if let menu = copyChildren(of: node).first(where: { stringValue(of: $0, attribute: kAXRoleAttribute) == kAXMenuRole as String }) {
+                return menu
+            }
+            current = copyParent(of: node)
+        }
+        return nil
+    }
+
     /// Presses a menu bar item by its titles, without opening the menu on screen.
     public func pressMenuItem(app query: String, path: [String]) throws -> ToolCallResult {
         try requireUsableComputerUseSession()
         let app = try AppDiscovery.resolveRunning(query)
-        let item = try MenuPath.resolve(path, appElement: AXUIElementCreateApplication(app.pid))
+        let appElement = AXUIElementCreateApplication(app.pid)
+        var item = try MenuPath.resolve(path, appElement: appElement, requireEnabled: false)
+        // Commands that act on the key window (Rename, Compress, Close Window) are
+        // disabled while the app is in the background. Synthetic SkyLight focus on
+        // its window, which never activates the app, lets AppKit re-validate them.
+        var focus: SkyLightSyntheticFocusContext?
+        if !MenuPath.isEnabled(item), let windowID = currentWindowID(for: query, pid: app.pid) {
+            focus = try? SkyLightSPI.shared.beginSyntheticTargetFocus(targetPID: app.pid, targetWindowID: windowID)
+            let deadline = Date().addingTimeInterval(0.5)
+            while focus != nil, !MenuPath.isEnabled(item), Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.03)
+                item = try MenuPath.resolve(path, appElement: appElement, requireEnabled: false)
+            }
+        }
+        defer {
+            if let focus {
+                try? SkyLightSPI.shared.endSyntheticTargetFocus(focus)
+            }
+        }
+        guard MenuPath.isEnabled(item) else {
+            throw ComputerUseError.message("menu item \(path.joined(separator: " > ")) is disabled")
+        }
         // A menu command that opens a modal panel can hold the reply; the press is already delivered.
         AXUIElementSetMessagingTimeout(item, 2)
         let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
@@ -974,6 +1034,17 @@ public final class ComputerUseService {
         } catch ComputerUseError.stateUnavailable {
             return .text("Pressed \(path.joined(separator: " > ")); the app has no window to read back.")
         }
+    }
+
+    /// The window the agent works in, or the app's focused window.
+    private func currentWindowID(for query: String, pid: pid_t) -> CGWindowID? {
+        if let windowID = snapshotsByApp[query.lowercased()]?.targetWindowID {
+            return windowID
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return SkyLightSPI.shared.windowID(for: value as! AXUIElement)
     }
 
     public func click(
@@ -1050,6 +1121,9 @@ public final class ComputerUseService {
 
             do {
                 switch clickMethod {
+                case .auto where clickCount == 1 && button == .left
+                    && selectTableRow(containing: record.element, extending: modifiers.contains(.maskCommand)):
+                    break
                 case .auto where clickCount >= 2 && button == .left:
                     try performMultiClick(on: record, windowPoint: windowPoint, targetPoint: targetPoint,
                                           clickCount: clickCount, elementIndex: elementIndex, snapshot: snapshot)
