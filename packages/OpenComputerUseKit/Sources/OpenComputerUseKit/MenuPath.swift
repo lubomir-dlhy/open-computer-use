@@ -74,6 +74,11 @@ enum MenuPath {
         for (depth, title) in path.enumerated() {
             let items = menuItems(under: node, isMenuBar: depth == 0)
             let titles = items.map { stringAttribute($0, kAXTitleAttribute) ?? "" }
+            // The last title may name a control inside an item (Finder's "Red" tag button).
+            if depth == path.count - 1, depth > 0, match(title, in: titles) == nil,
+               let control = pressableDescendant(matching: title, in: items) {
+                return control
+            }
             guard let index = match(title, in: titles) else {
                 let shown = titles.filter { !$0.isEmpty }.prefix(30).joined(separator: ", ")
                 throw ComputerUseError.invalidArguments("menu_path: no unique item \(title.debugDescription) here. Items: \(shown)")

@@ -81,8 +81,11 @@ Work without bringing apps forward or touching the user's windows:
     click FOLDER_ROW (sky_click), press super+Down, press super+alt+v, press super+Up]`. The user's clipboard
     is restored afterwards.
   - Expand a folder row in list view: `[click ROW (sky_click), press Right]`.
-  - Compress the selection: `click` a selected file's name field with `"menu_item": "Compress"`.
-  Finder tags cannot be applied in the background yet.
+  - Compress: select the files and press the menu bar item in the same batch, e.g. `[click ROW1 (sky_click),
+    click ROW2 (sky_click, "modifiers": ["cmd"]), {"tool":"click","menu_path":["File","Compress"]}]`. Inside a
+    batch Finder's menu bar commands are enabled and no menu is shown; prefer this to context menus, which pop up
+    over the user's screen.
+  Finder tags cannot be applied in the background yet; say so instead of retrying.
 - **Popovers:** keys sent with the default method can close a transient popover; use `"key_method": "app_post"`
   for keys meant for a popover's field.
 - **Keys:** `press_key` delivers through SkyLight while the app is in the background, so shortcuts and `Return`
