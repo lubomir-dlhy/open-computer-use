@@ -341,20 +341,20 @@ final class AgentDisplay: @unchecked Sendable {
         return false
     }
 
-    /// Asks a running app without windows to show one (the Dock-click "reopen"
-    /// event, sent without activation) and parks the window that appears, so it
-    /// never lands over the user's work.
+    /// Gets a window for an app that has none the tree can use: waits for one that
+    /// is still appearing (an app just launched), or asks the app to show one with
+    /// the Dock-click "reopen" event, sent without activation. The window is parked
+    /// so it never lands over the user's work.
     func openWindowInBackground(app: RunningAppDescriptor, timeout: TimeInterval = 4) throws -> Bool {
-        guard let url = app.runningApplication.bundleURL else {
-            return false
-        }
-        // A window the tree cannot use (e.g. a panel being created) must not
-        // trigger reopen, which makes some apps open their main window as well.
+        // Reopen only when nothing is on screen: an app with a window already
+        // appearing, or a panel, would open its main window as well.
         let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        guard !onScreen.contains(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.pid && ($0[kCGWindowLayer as String] as? Int) == 0 }) else {
-            return false
+        let hasOnScreenWindow = onScreen.contains {
+            ($0[kCGWindowOwnerPID as String] as? Int32) == app.pid && ($0[kCGWindowLayer as String] as? Int) == 0
         }
-        try AppDiscovery.openInBackground(appURL: url)
+        if !hasOnScreenWindow, let url = app.runningApplication.bundleURL {
+            try AppDiscovery.openInBackground(appURL: url)
+        }
         let appElement = AXUIElementCreateApplication(app.pid)
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
