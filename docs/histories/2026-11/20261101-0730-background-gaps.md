@@ -39,3 +39,13 @@ Every fix keeps the target app inactive. Where macOS or the app forces the foreg
 - **Leases** (`AgentLeases`): an action claims the agent's window (apps whose menus can open another window or document) or the whole app (single-window apps). Other sessions wait up to 30 s and then get a clear error; `get_app_state` notes the conflict without waiting. Claims end with the session's turn, or after 120 s idle. Input into one process is serialized for the length of a call.
 - Foreground guard and SkyLight held focus are per action and per process instead of single global slots. Locked Use scoped requests stay strictly serialized.
 - Live check (two clients on one agent): actions on two apps overlapped; a second agent was refused a single-window app with a clear message, and got it as soon as the first agent's turn ended.
+
+## [2026-11-01 09:45] | Task: Close the windows an agent opened
+
+### 📥 User Query
+> Make sure the agent cleans up: a window it opens should be closed at the end, and also when it fails.
+
+### 🛠 Changes Overview
+- `AgentWindows` records the windows of the target app that appear during each action or `get_app_state` (including apps OCU launched). At turn end, and at session end (which also covers a crashed agent), they are closed with their close buttons in the background, and launched apps left without windows are quit.
+- A save-changes sheet is cancelled and its window left open, so no work is discarded. `get_app_state keep_window: true` keeps the agent's window for tasks that must leave it open.
+- Live check: the window was closed at turn end, kept with keep_window, and closed after a killed client. A launched Calculator was quit. Closing caused no focus changes.

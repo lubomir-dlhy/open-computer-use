@@ -108,6 +108,7 @@ public enum ToolDefinitions {
                     "max_tree_nodes": positiveIntegerProperty(description: "Default 1200"),
                     "max_tree_depth": positiveIntegerProperty(description: "Default 64"),
                     "window_id": positiveIntegerProperty(description: "Read this window (ids are listed under Other windows); later actions stay on it"),
+                    "keep_window": ["type": "boolean", "description": "Keep this window open when you finish. Windows you open are otherwise closed at the end of your turn."],
                     "window_placement": stringProperty(
                         description: "keep (default); agent_display parks the window on the agent's invisible display so a covered or other-Space window renders and takes input without touching the user's Space, focus or pointer (it leaves the user's desktop until restore or exit); restore puts it back.",
                         enumValues: WindowPlacement.allCases.map(\.rawValue)

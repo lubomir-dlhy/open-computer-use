@@ -53,6 +53,24 @@ public final class ComputerUseToolDispatcher {
     }
 
     private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        guard let app = arguments["app"] as? String, name == "batch" || name == "get_app_state" || Self.actionTools.contains(name) else {
+            return try callClaimed(name: name, arguments: arguments)
+        }
+        let result = try service.trackingOpenedWindows(app: app) { try callClaimed(name: name, arguments: arguments) }
+        guard name == "get_app_state", arguments["keep_window"] != nil else {
+            return result
+        }
+        guard let keep = arguments["keep_window"] as? NSNumber, CFGetTypeID(keep) == CFBooleanGetTypeID() else {
+            throw ComputerUseError.invalidArguments("keep_window must be a boolean")
+        }
+        guard keep.boolValue else { return result }
+        let note = service.keepCurrentWindow(app: app)
+            ? "This window stays open after you finish."
+            : "keep_window only applies to a window you opened; this one was already open and is never closed."
+        return ToolCallResult(content: result.content + [.text(note)], isError: result.isError)
+    }
+
+    private func callClaimed(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         let acts = name == "batch" || Self.actionTools.contains(name)
         guard let app = arguments["app"] as? String, acts || name == "get_app_state",
               let claim = service.leaseResource(for: app) else {

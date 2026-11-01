@@ -136,6 +136,8 @@ public final class StdioMCPServer {
 
     private func endTurn() {
         service.clearQueryIndexes()
+        // Done or failed, the agent's own windows go away before others may claim the app.
+        SessionOwner.with(sessionID) { _ = service.closeOpenedWindows() }
         AgentLeases.shared.release(session: sessionID)
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()

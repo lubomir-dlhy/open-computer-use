@@ -646,6 +646,27 @@ public final class ComputerUseService {
 
     public func clearQueryIndexes() { targetedElements.clear() }
 
+    private let agentWindows = AgentWindows()
+
+    /// Runs a call and remembers the windows it opened in `query`'s app.
+    func trackingOpenedWindows<T>(app query: String, _ body: () throws -> T) rethrows -> T {
+        try agentWindows.tracking(app: query, body)
+    }
+
+    /// Keeps the agent's current window of `query`'s app open after the session.
+    func keepCurrentWindow(app query: String) -> Bool {
+        guard let app = try? AppDiscovery.resolveRunning(query), let windowID = currentWindowID(for: query, pid: app.pid),
+              agentWindows.isOpenedByAgent(windowID) else { return false }
+        agentWindows.keep(windowID: windowID)
+        return true
+    }
+
+    /// Closes the windows this session opened, and quits apps it launched that are left empty.
+    @discardableResult
+    public func closeOpenedWindows() -> [String] {
+        agentWindows.closeAll()
+    }
+
     public init() {}
 
     /// The result an action returns, read once the window has settled. A diff

@@ -80,6 +80,14 @@ Work without bringing apps forward or touching the user's windows:
   reach Chromium and AppKit menus. Do not force `click_method: "app_post"`/`"sky_click"` on elements that have an
   index; the default tries accessibility first.
 
+## Cleaning Up (macOS)
+
+Windows you open (File > New window, Get Info, an app Open Computer Use had to launch) are closed when your turn
+ends, or when your session ends because you finished or failed. An app launched for you is quit once it has no
+windows. When the task or the user needs a window to stay, such as "leave the article open", call
+`get_app_state` with `"keep_window": true` on it. A window whose app asks to save changes is left open instead of
+discarding work, so save or close documents yourself.
+
 ## Several Agents at Once (macOS)
 
 Agents connected to the same Open Computer Use app work in parallel. Each claims what it acts on:

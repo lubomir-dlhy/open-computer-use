@@ -104,4 +104,9 @@ final class AgentLeasesTests: XCTestCase {
         }
         XCTAssertNil(RequestEnvironment.current["OPEN_COMPUTER_USE_X"])
     }
+
+    func testKeepWindowMustBeABoolean() {
+        XCTAssertThrowsError(try ComputerUseToolDispatcher().callTool(
+            name: "get_app_state", arguments: ["app": "missing-test-app", "keep_window": "yes"]))
+    }
 }
