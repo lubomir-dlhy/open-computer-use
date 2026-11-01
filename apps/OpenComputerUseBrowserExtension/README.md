@@ -15,7 +15,7 @@ Install:
    **Load unpacked**, pick that folder (in the folder picker, Cmd+Shift+G and paste the path).
 
 The `background` permission keeps a profile with the extension loaded while it has no window, so the agent can
-open tabs in it.
+open tabs in it. Reloading the extension (an upgrade) unloads such profiles; reload with a window open in each.
 
 Remove: **Remove** on the extension's card in `chrome://extensions` of each profile, then delete the manifest above,
 `~/Library/Application Support/OpenComputerUse/BrowserExtension` and

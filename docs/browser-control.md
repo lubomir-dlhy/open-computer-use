@@ -69,7 +69,13 @@ the first connected profile.
 A profile's extension runs only while Chrome has the profile loaded. The manifest asks for the `background`
 permission, so Chrome keeps such profiles loaded with no window open and loads them at startup. A profile that is
 not running yet (installed but never opened since Chrome started) needs one window opened by the user; opening
-one programmatically brings Chrome forward, so the bridge reports it instead.
+one programmatically brings Chrome forward, so the bridge reports it instead. Reloading the extension drops that
+hold, so Chrome unloads windowless profiles; reload while each profile has a window open. A tab opened in a
+profile with no window gets a new window, minimised right away so it never covers the user's windows (Chrome on
+macOS ignores `state: "minimized"` in `windows.create`).
+
+A call with no `tab` and no `profile` follows the session's current tab, except `open`, which goes to the default
+profile.
 
 ## Background behaviour
 

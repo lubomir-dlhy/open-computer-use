@@ -662,7 +662,10 @@ async function createBackgroundTab(url) {
     const tab = await chrome.tabs.create({ active: false, url, windowId: window.id });
     if (hasTabId(tab)) return tab;
   }
+  // A profile with no window: minimised so it never covers the user's windows (Chrome on macOS
+  // ignores state "minimized" at creation).
   const created = await chrome.windows.create({ focused: false, type: "normal", url });
+  await chrome.windows.update(created.id, { state: "minimized" }).catch(() => {});
   const tab = created.tabs?.find(hasTabId);
   if (!tab) throw new Error("Created Chrome window has no tab");
   return tab;

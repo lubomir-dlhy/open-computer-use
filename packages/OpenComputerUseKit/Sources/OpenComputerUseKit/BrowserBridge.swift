@@ -58,7 +58,7 @@ final class BrowserBridge: @unchecked Sendable {
     func call(_ method: String, _ params: [String: Any] = [:], profile: String? = nil, timeout: TimeInterval = 15) throws -> Any {
         var params = params
         if params["session_id"] == nil { params["session_id"] = Self.sessionID() }
-        let connection = try route(params, profile: profile)
+        let connection = try route(params, profile: profile, followCurrentTab: method != "createTab")
         let result = try send(connection, method, params, timeout: timeout)
         if ["createTab", "getTabs", "getUserTabs", "claimUserTab"].contains(method) { record(result, on: connection) }
         return result
@@ -111,7 +111,7 @@ final class BrowserBridge: @unchecked Sendable {
 
     // MARK: - Routing
 
-    private func route(_ params: [String: Any], profile: String?) throws -> Connection {
+    private func route(_ params: [String: Any], profile: String?, followCurrentTab: Bool) throws -> Connection {
         let live = try refresh()
         if let tab = params["tabId"] as? Int {
             if let owner = owner(of: tab) { return owner }
@@ -126,7 +126,7 @@ final class BrowserBridge: @unchecked Sendable {
         if let profile {
             return try connection(for: profile, in: live)
         }
-        if let current = session(SessionOwner.current, { $0.currentTab }), let owner = owner(of: current) {
+        if followCurrentTab, let current = session(SessionOwner.current, { $0.currentTab }), let owner = owner(of: current) {
             return owner
         }
         if live.count > 1, let preferred = BrowserProfiles.defaultProfile(among: live.compactMap(\.profile)),

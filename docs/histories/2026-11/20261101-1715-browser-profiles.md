@@ -15,6 +15,7 @@
 - **Extension 1.1.0**: `getInfo` returns a random per-profile token kept in `chrome.storage.local`; `background` permission so Chrome keeps profiles with the extension loaded without a window; `onStartup` wakes the worker so it connects at profile start.
 - **`BrowserProfiles`**: finds the profile folder whose extension storage holds the token, reads name and email from `Local State`; default and per-profile notes from `browser-profiles.json` (or `OPEN_COMPUTER_USE_BROWSER_PROFILE`); matches by name, email or folder, never by note.
 - **`BrowserBridge`**: one socket per profile (Chrome starts one native host per profile); routes by tab owner, then `profile`, then the current tab's profile, then the default; `finalizeTabs` in every profile at turn end.
+- **Windowless profiles**: a tab opened in a profile with no window gets a new window minimised right after creation. `open` without `profile` goes to the default, not the current tab's profile.
 - **`browser` tool / `js`**: `profile` on `open` and `tabs`, its schema description listing the profiles, notes and default; `tabs` groups by profile and names installed profiles that are not running.
 
 ### 🧠 Design Intent (Why)
