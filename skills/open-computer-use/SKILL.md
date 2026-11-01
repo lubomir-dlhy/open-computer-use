@@ -69,8 +69,9 @@ Work without bringing apps forward or touching the user's windows:
   context menu and chooses the item in one step (a word of a label also works). A right-click
   (`"mouse_button": "right"`) on an element only lists the menu's items and closes it again, because an open
   menu captures the user's typing; then choose with `menu_item`.
-- **Double-click:** `click` with `"click_count": 2` on an element index sends a real background double-click
-  (opens items, starts in-place editing in web apps such as TodoMVC).
+- **Double-click and in-place editing:** `click` with `"click_count": 2` on an element index sends a real
+  background double-click. To edit in place (e.g. a TodoMVC item), put the double-click, `press_key` `super+a`,
+  `type_text` and `press_key` `Return` in one `batch`: between separate calls the editor loses focus and closes.
 - **Lists and Finder:** clicking a row selects it; add `"modifiers": ["cmd"]` to add a row to the selection.
   With files selected, `menu_item` on a selected file's name field reaches Finder's context menu, e.g.
   `"Compress"`; Finder's menu bar commands are disabled while it is in the background. Moving files and

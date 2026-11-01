@@ -992,6 +992,11 @@ public final class ComputerUseService {
             _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
             throw ComputerUseError.message("Pressing context menu item \(item) failed with \(result.rawValue)")
         }
+        // The app closes the menu after running the item; a later call must not find it still open.
+        let closeDeadline = Date().addingTimeInterval(0.5)
+        while openContextMenu(near: element) != nil, Date() < closeDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
         return try actionResult(for: query, recoveryPolicy: .readOnly)
     }
 
@@ -2055,7 +2060,7 @@ public final class ComputerUseService {
         // reply until the menu closes; the menu is open once the request is in.
         let showsMenu = action == kAXShowMenuAction as String
         if showsMenu {
-            AXUIElementSetMessagingTimeout(element, 0.5)
+            AXUIElementSetMessagingTimeout(element, 0.05)
         }
         defer {
             if showsMenu {
