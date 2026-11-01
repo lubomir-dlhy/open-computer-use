@@ -49,6 +49,10 @@ public final class ComputerUseToolDispatcher {
     ]
 
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        SecretInput.redact(try callToolUnredacted(name: name, arguments: arguments))
+    }
+
+    private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         if name == "batch" {
             return try callBatch(arguments: arguments)
         }
@@ -191,7 +195,7 @@ public final class ComputerUseToolDispatcher {
         case "type_text":
             return try service.typeText(
                 app: requireString("app", in: arguments),
-                text: requireString("text", in: arguments),
+                text: try textOrSecret("text", in: arguments),
                 keyMethod: try parseKeyMethod(optionalString("key_method", in: arguments))
             )
         case "press_key":
@@ -204,7 +208,7 @@ public final class ComputerUseToolDispatcher {
             return try service.setValue(
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
-                value: requireString("value", in: arguments)
+                value: try textOrSecret("value", in: arguments)
             )
         case "select_text":
             return try service.selectText(
@@ -225,13 +229,27 @@ public final class ComputerUseToolDispatcher {
             return try callTool(name: name, arguments: arguments)
         } catch let error as ComputerUseError {
             return ToolCallResult.text(
-                error.errorDescription ?? String(describing: error),
+                SecretInput.redact(error.errorDescription ?? String(describing: error)),
                 isError: error.toolResultIsError
             )
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            return ToolCallResult.text(message, isError: true)
+            return ToolCallResult.text(SecretInput.redact(message), isError: true)
         }
+    }
+
+    /// Literal text, or the value of the environment variable named by `secret_env`.
+    private func textOrSecret(_ key: String, in arguments: [String: Any]) throws -> String {
+        guard let raw = arguments[SecretInput.argumentKey] else {
+            return try requireString(key, in: arguments)
+        }
+        guard arguments[key] == nil else {
+            throw ComputerUseError.invalidArguments("pass either \(key) or secret_env, not both")
+        }
+        guard let name = raw as? String else {
+            throw ComputerUseError.invalidArguments("secret_env must be an environment variable name")
+        }
+        return try SecretInput.resolve(name)
     }
 
     private func requireString(_ key: String, in arguments: [String: Any]) throws -> String {

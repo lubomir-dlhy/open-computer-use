@@ -164,8 +164,9 @@ public enum ToolDefinitions {
                     "app": appProperty(),
                     "element_index": elementIndexProperty(),
                     "value": stringProperty(),
+                    "secret_env": secretEnvProperty(),
                 ],
-                required: ["app", "element_index", "value"]
+                required: ["app", "element_index"]
             )
         ),
         ToolDefinition(
@@ -192,9 +193,10 @@ public enum ToolDefinitions {
                 properties: [
                     "app": appProperty(),
                     "text": stringProperty(),
+                    "secret_env": secretEnvProperty(),
                     "key_method": keyMethodProperty(),
                 ],
-                required: ["app", "text"]
+                required: ["app"]
             )
         ),
         ToolDefinition(
@@ -239,6 +241,10 @@ private func actionSchema(properties: [String: Any], required: [String]) -> [Str
 
 private func appProperty() -> [String: Any] {
     stringProperty(description: "App name or bundle id")
+}
+
+private func secretEnvProperty() -> [String: Any] {
+    stringProperty(description: "Instead of the literal text: name of an environment variable in the Open Computer Use process (e.g. a password). Its value is used but never returned.")
 }
 
 private func elementIndexProperty() -> [String: Any] {

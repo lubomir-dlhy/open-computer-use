@@ -50,6 +50,19 @@ controls by text and/or role without rendering a tree or taking a screenshot.
 - On macOS, keep every interaction in the background: never raise, activate or un-minimize the user's windows, and avoid app shortcuts that bring a window forward (Chrome `cmd+l`). Prefer `sky_click`, `drag_method: "sky"` and `sky_key` for Chromium/Electron. See "Staying in the Background" in `references/usage.md`.
 - On Windows and Linux, confirm the command is running inside the logged-in desktop session before assuming GUI automation is available.
 
+## Secrets (macOS)
+
+When a password or other secret is provided as an environment variable of the Open Computer Use
+process, never ask for or print its value. Pass the variable's name instead of the text:
+
+- `type_text` with `{"app": "...", "secret_env": "MY_PASSWORD"}` types it into the focused field.
+- `set_value` with `{"app": "...", "element_index": "4", "secret_env": "MY_PASSWORD"}` sets it.
+
+Open Computer Use reads the value itself, and every later result shows `•••` in its place. By default
+only names containing `PASSWORD`, `PASSCODE`, `PIN` or `OTP` are accepted; others must be listed in
+`OPEN_COMPUTER_USE_SECRET_ENV` (comma-separated). Prefer `set_value` on the password field, then click
+the form's submit button.
+
 ## Common CLI Actions
 
 ```sh

@@ -105,10 +105,10 @@ public final class StdioMCPServer {
         } catch let error as ComputerUseError {
             let payload = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             let id = payload?["id"]
-            let result = ToolCallResult.text(error.errorDescription ?? String(describing: error), isError: error.toolResultIsError)
+            let result = ToolCallResult.text(SecretInput.redact(error.errorDescription ?? String(describing: error)), isError: error.toolResultIsError)
             return try? encodeJSONRPCResult(id: id, result: result.asDictionary)
         } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            let message = SecretInput.redact((error as? LocalizedError)?.errorDescription ?? String(describing: error))
             let payload = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             let id = payload?["id"]
             return try? encodeJSONRPCResult(

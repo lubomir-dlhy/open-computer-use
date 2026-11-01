@@ -128,7 +128,7 @@ enum MacOSAppAgentProxy {
             let response = try client.request([
                 "kind": "mcp",
                 "line": line,
-                "environment": proxiedEnvironment(),
+                "environment": proxiedEnvironment(secretsReferencedBy: line),
             ])
 
             if let responseLine = response["response"] as? String {
@@ -151,9 +151,18 @@ enum MacOSAppAgentProxy {
         )
     }
 
-    private static func proxiedEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment.filter { key, _ in
+    private static func proxiedEnvironment(secretsReferencedBy line: String? = nil) -> [String: String] {
+        let processEnvironment = ProcessInfo.processInfo.environment
+        var environment = processEnvironment.filter { key, _ in
             key.hasPrefix("OPEN_COMPUTER_USE_")
+        }
+        // A secret reaches the agent only for the call that names it.
+        if let line, line.contains(SecretInput.argumentKey),
+           let payload = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+            for name in SecretInput.referencedNames(in: payload["params"] ?? [:])
+            where SecretInput.isAllowed(name, environment: processEnvironment) {
+                environment[name] = processEnvironment[name]
+            }
         }
         if let url = try? OCUConfiguration.fileURL(environment: OCUConfiguration.environment) {
             environment["OPEN_COMPUTER_USE_CONFIG_FILE"] = url.path
