@@ -348,6 +348,12 @@ final class AgentDisplay: @unchecked Sendable {
         guard let url = app.runningApplication.bundleURL else {
             return false
         }
+        // A window the tree cannot use (e.g. a panel being created) must not
+        // trigger reopen, which makes some apps open their main window as well.
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        guard !onScreen.contains(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.pid && ($0[kCGWindowLayer as String] as? Int) == 0 }) else {
+            return false
+        }
         try AppDiscovery.openInBackground(appURL: url)
         let appElement = AXUIElementCreateApplication(app.pid)
         let deadline = Date().addingTimeInterval(timeout)

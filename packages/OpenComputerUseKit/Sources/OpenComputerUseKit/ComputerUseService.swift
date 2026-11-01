@@ -811,6 +811,12 @@ public final class ComputerUseService {
         var failure: String?
         var completed = 0
         var notes: [String] = []
+        // One focus session for all steps: an in-place editor opened by a double-click
+        // would otherwise be blurred, and closed, before the next step types into it.
+        let app = try? AppDiscovery.resolveRunning(query)
+        let windowID = app.flatMap { currentWindowID(for: query, pid: $0.pid) }
+        let holdsFocus = app != nil && windowID != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier != app?.pid
+        func runSteps() {
         for (offset, step) in steps.enumerated() {
             do {
                 let result = try withActionObservation(step.observation) { try step.run() }
@@ -825,6 +831,12 @@ public final class ComputerUseService {
             }
             if failure != nil { break }
             completed += 1
+        }
+        }
+        if holdsFocus, let app, let windowID {
+            SkyLightSPI.shared.withHeldSyntheticFocus(pid: app.pid, windowID: windowID, runSteps)
+        } else {
+            runSteps()
         }
 
         var header = failure.map { ["Ran \(completed) of \(steps.count) steps; \($0)"] } ?? ["Ran \(steps.count) steps."]
@@ -983,6 +995,37 @@ public final class ComputerUseService {
         return try actionResult(for: query, recoveryPolicy: .readOnly)
     }
 
+    /// An open menu captures the user's keyboard, so a right-click only reads the
+    /// menu and closes it again; `menu_item` then chooses in one step.
+    private func listContextMenu(of record: ElementRecord, elementIndex: String) throws -> ToolCallResult? {
+        guard let element = record.element,
+              (copyActions(for: element) ?? record.rawActions).contains(kAXShowMenuAction as String),
+              try performAction(named: kAXShowMenuAction as String, on: element, availableActions: [kAXShowMenuAction as String]) else {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(1)
+        var menu: AXUIElement?
+        while menu == nil, Date() < deadline {
+            menu = openContextMenu(near: element)
+            if menu == nil { Thread.sleep(forTimeInterval: 0.03) }
+        }
+        guard let menu else {
+            return nil
+        }
+        let items = copyChildren(of: menu)
+        defer { _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString) }
+        let titles = items.compactMap { item -> String? in
+            if let title = stringValue(of: item, attribute: kAXTitleAttribute), !title.isEmpty {
+                return title
+            }
+            let inner = copyChildren(of: item).flatMap { [$0] + copyChildren(of: $0) }
+                .compactMap { stringValue(of: $0, attribute: kAXDescriptionAttribute) ?? stringValue(of: $0, attribute: kAXTitleAttribute) }
+                .filter { !$0.isEmpty }
+            return inner.isEmpty ? nil : inner.joined(separator: " | ")
+        }
+        return .text("Context menu of element \(elementIndex), closed again so it does not capture the user's typing: \(titles.joined(separator: "; ")). Choose one with click element_index \(elementIndex) and menu_item.")
+    }
+
     /// A context menu hangs off the element it was shown for, or off an ancestor
     /// such as the outline of a Finder row.
     private func openContextMenu(near element: AXUIElement) -> AXUIElement? {
@@ -1009,6 +1052,9 @@ public final class ComputerUseService {
         var focus: SkyLightSyntheticFocusContext?
         if !MenuPath.isEnabled(item), let windowID = currentWindowID(for: query, pid: app.pid) {
             focus = try? SkyLightSPI.shared.beginSyntheticTargetFocus(targetPID: app.pid, targetWindowID: windowID)
+            if let focus {
+                try? SkyLightSPI.shared.makeSyntheticTargetWindowKey(focus)
+            }
             let deadline = Date().addingTimeInterval(0.5)
             while focus != nil, !MenuPath.isEnabled(item), Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.03)
@@ -1071,6 +1117,10 @@ public final class ComputerUseService {
 
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
+        if clickMethod == .auto, button == .right, let elementIndex, snapshot.mode == .accessibility,
+           let listed = try listContextMenu(of: try lookupElement(snapshot: snapshot, index: elementIndex), elementIndex: elementIndex) {
+            return listed
+        }
         if elementIndex == nil, !snapshot.acceptsScreenshotCoordinates {
             throw ComputerUseError.stateUnavailable(SnapshotObservationOptions.screenshotOmittedNote + "; request a screenshot before screenshot-coordinate actions")
         }
@@ -1383,6 +1433,15 @@ public final class ComputerUseService {
             let target = try skyKeyTarget(for: snapshot)
             try InputSimulation.typeTextWithSkyLight(text, windowID: target.windowID, pid: target.pid)
             return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
+        }
+
+        // Web apps only see a replaced selection through real key events.
+        if keyMethod == .auto, prefersSkyKeys(for: snapshot), let focused = liveFocusedElement(in: snapshot),
+           hasAncestorRole("AXWebArea", of: focused),
+           !(stringValue(of: focused, attribute: kAXSelectedTextAttribute) ?? "").isEmpty,
+           let target = try? skyKeyTarget(for: snapshot),
+           (try? InputSimulation.typeTextWithSkyLight(text, windowID: target.windowID, pid: target.pid)) != nil {
+            return try actionResult(for: query, recoveryPolicy: .readOnly)
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
@@ -2357,8 +2416,14 @@ public final class ComputerUseService {
             return false
         }
 
-        let baseValue = editableBaseValue(for: element)
         try requireUsableComputerUseSession()
+        // Typing replaces a selection, as a keyboard would; otherwise it appends.
+        if let selected = stringValue(of: element, attribute: kAXSelectedTextAttribute), !selected.isEmpty,
+           isSettable(element: element, attribute: kAXSelectedTextAttribute),
+           AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success {
+            return true
+        }
+        let baseValue = editableBaseValue(for: element)
         let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, (baseValue + text) as CFString)
         switch result {
         case .success:

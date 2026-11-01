@@ -65,10 +65,10 @@ Work without bringing apps forward or touching the user's windows:
 - **Windows:** `get_app_state` lists the app's other windows; pass `window_id` to read a specific one. Later actions
   stay on that window.
 - **Apps without a window:** `get_app_state` asks the app to show one in the background (on the agent display).
-- **Context menus:** prefer one step: `click` with `element_index` and `"menu_item": "Mark as done"` opens that
-  element's context menu and chooses the item (a word of a label also works, e.g. `"Red"` for Finder's red tag
-  button). A right-click (`"mouse_button": "right"`) instead leaves the menu open, and an open menu captures the
-  user's typing until you pick an item.
+- **Context menus:** `click` with `element_index` and `"menu_item": "Mark as done"` opens that element's
+  context menu and chooses the item in one step (a word of a label also works). A right-click
+  (`"mouse_button": "right"`) on an element only lists the menu's items and closes it again, because an open
+  menu captures the user's typing; then choose with `menu_item`.
 - **Double-click:** `click` with `"click_count": 2` on an element index sends a real background double-click
   (opens items, starts in-place editing in web apps such as TodoMVC).
 - **Lists and Finder:** clicking a row selects it; add `"modifiers": ["cmd"]` to add a row to the selection.

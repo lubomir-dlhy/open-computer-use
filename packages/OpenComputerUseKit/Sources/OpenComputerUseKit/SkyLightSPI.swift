@@ -11,6 +11,8 @@ struct SkyLightActivationCommand: Equatable {
 
 struct SkyLightSyntheticFocusContext {
     let deactivateTarget: SkyLightActivationCommand
+    /// Part of a held session: beginning and ending it change nothing.
+    var held = false
 }
 
 struct SkyLightSyntheticFocusPlan: Equatable {
@@ -330,10 +332,34 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
         setWindowLocationFunction(opaquePointer(for: event), point.x, point.y)
     }
 
+    private let holdLock = NSLock()
+    nonisolated(unsafe) private var heldFocus: (pid: pid_t, windowID: CGWindowID, context: SkyLightSyntheticFocusContext)?
+
+    /// Keeps the target window synthetically focused across several inputs, so an
+    /// editor opened by one step (a double-click) is not blurred before the next.
+    func withHeldSyntheticFocus<T>(pid: pid_t, windowID: CGWindowID, _ body: () throws -> T) rethrows -> T {
+        guard holdLock.withLock({ heldFocus == nil }), capability.isAvailable,
+              let context = try? beginSyntheticTargetFocus(targetPID: pid, targetWindowID: windowID) else {
+            return try body()
+        }
+        try? makeSyntheticTargetWindowKey(context)
+        holdLock.withLock { heldFocus = (pid, windowID, context) }
+        defer {
+            holdLock.withLock { heldFocus = nil }
+            try? endSyntheticTargetFocus(context)
+        }
+        return try body()
+    }
+
     func beginSyntheticTargetFocus(
         targetPID: pid_t,
         targetWindowID: CGWindowID
     ) throws -> SkyLightSyntheticFocusContext {
+        if let held = holdLock.withLock({ heldFocus }), held.pid == targetPID, held.windowID == targetWindowID {
+            var context = held.context
+            context.held = true
+            return context
+        }
         guard let getProcessForPIDFunction else {
             throw unavailableError()
         }
@@ -387,6 +413,7 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
     }
 
     func endSyntheticTargetFocus(_ context: SkyLightSyntheticFocusContext) throws {
+        guard !context.held else { return }
         try postActivationCommand(context.deactivateTarget)
         if InputTiming.focusRecordSettle > 0 {
             Thread.sleep(forTimeInterval: InputTiming.focusRecordSettle)
