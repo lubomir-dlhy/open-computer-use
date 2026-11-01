@@ -2064,7 +2064,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertThrowsError(try parseKeyMethod("global")) { error in
             XCTAssertEqual(
                 (error as? ComputerUseError)?.errorDescription,
-                "Invalid key_method 'global'. Expected one of: auto, sky_key"
+                "Invalid key_method 'global'. Expected one of: auto, sky_key, app_post"
             )
         }
         XCTAssertEqual(keyActionSnapshotRecoveryPolicy(for: .skyKey), .readOnly)
@@ -2076,7 +2076,7 @@ final class OpenComputerUseKitTests: XCTestCase {
             let tool = ToolDefinitions.all.first { $0.name == name }
             let properties = tool?.inputSchema["properties"] as? [String: Any]
             let keyMethod = properties?["key_method"] as? [String: Any]
-            XCTAssertEqual(keyMethod?["enum"] as? [String], ["auto", "sky_key"], name)
+            XCTAssertEqual(keyMethod?["enum"] as? [String], ["auto", "sky_key", "app_post"], name)
         }
     }
 
