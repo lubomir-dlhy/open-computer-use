@@ -26,6 +26,19 @@ final class BrowserToolTests: XCTestCase {
         XCTAssertThrowsError(try BrowserTool().call(["action": "click"]), "no current tab")
     }
 
+    func testProfilesMatchByNameEmailOrDirectoryButNotByNote() {
+        let personal = BrowserProfile(directory: "Profile 17", name: "Ľubomír", email: "me@gmail.com", note: "personal; not CulturePulse")
+        let work = BrowserProfile(directory: "Profile 16", name: "culturepulse.ai", email: "me@culturepulse.ai")
+        let contact = BrowserProfile(directory: "Profile 20", name: "contact@lubomirdlhy.sk", email: "")
+        let profiles = [personal, work, contact]
+        XCTAssertEqual(BrowserProfiles.select("culturepulse", from: profiles), work)
+        XCTAssertEqual(BrowserProfiles.select("me@gmail.com", from: profiles), personal)
+        XCTAssertEqual(BrowserProfiles.select("Profile 20", from: profiles), contact)
+        XCTAssertEqual(BrowserProfiles.select("lubomirdlhy.sk", from: profiles), contact)
+        XCTAssertNil(BrowserProfiles.select("culturepulse", from: [personal]))
+        XCTAssertNil(BrowserProfiles.select("me@", from: profiles), "ambiguous")
+    }
+
     func testNativeHostIsRecognisedFromChromesLaunchArgument() {
         XCTAssertTrue(BrowserNativeHost.isInvocation(arguments: ["chrome-extension://\(BrowserNativeHost.extensionID)/"]))
         XCTAssertTrue(BrowserNativeHost.isInvocation(arguments: ["browser-host"]))

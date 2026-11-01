@@ -129,7 +129,8 @@ macOS actions return only what changed since the state the agent last saw. `~` i
 
 Needs the Open Computer Use Browser extension (`open-computer-use browser-setup`, then Load unpacked in `chrome://extensions`). Everything runs in background tabs through Chrome's debugger: Chrome is never activated and the user's visible tab never changes.
 
-- `{"action": "open", "url": "https://…"}` opens a background tab and returns a snapshot: `[ref] role "name" state` lines plus visible text. Later calls default to that tab (`tab` picks another).
+- Pick the Chrome profile that owns the task's account with `profile` (name or email; the parameter description lists the profiles, their notes and the default). Work for an organisation goes in its profile; personal tasks in the default. `profile` matters only for `open` and `tabs`: later calls follow the tab.
+- `{"action": "open", "url": "https://…", "profile": "…"}` opens a background tab and returns a snapshot: `[ref] role "name" state` lines plus visible text. Later calls default to that tab (`tab` picks another).
 - Target elements by `ref`, `selector` or `name` (visible text); `x`/`y` are viewport CSS pixels.
 - `click` (`click_count`, `button`, `modifiers`, `hold`, `force`), `hover`, `type` (`text` or `secret_env`, `clear`, `format`), `key` (`Enter`, `cmd+a`, …), `scroll` (`direction`, `amount`), `select` (native `<select>`), `drag` (`to_ref`/`to_selector`/`to_name`/`to_x`+`to_y`; HTML5 drag-and-drop works), `upload` (`files`), `download`, `evaluate` (`expression`).
 - Results are diffs against the last snapshot; a navigation returns the new page. `wait_for` / `wait_timeout` work as in native actions; `wait` also takes `url`, `load` and `selector`.

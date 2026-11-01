@@ -58,7 +58,7 @@ Every action returns what changed as text (\`~\` changed, \`+\` added, \`-\` rem
 
 Chrome, through the Open Computer Use Browser extension (background tabs; Chrome never comes forward):
 
-- \`const tab = await cua.browser.open(url)\` shows a snapshot of \`[ref] role "name"\` lines (\`{ emit: false }\` hides it); also \`await cua.browser.tabs()\` and \`await cua.browser.claim(tabId)\`.
+- \`const tab = await cua.browser.open(url, { profile })\` (profile: the Chrome profile's name or email; work for an organisation goes in its profile) shows a snapshot of \`[ref] role "name"\` lines (\`{ emit: false }\` hides it); also \`await cua.browser.tabs()\` and \`await cua.browser.claim(tabId)\`.
 - Targets: a ref number, a CSS selector string, \`[x, y]\`, or \`{ name: "Submit" }\`.
 - \`tab.click(target, { clickCount?, button?, modifiers?, hold? })\`, \`tab.hover(target)\`, \`tab.type(target, text, { clear?, secretEnv?, format? })\`, \`tab.key("Enter")\`, \`tab.scroll(target, "down", 1)\`, \`tab.drag(from, to)\` (real HTML5 drag-and-drop), \`tab.select(target, optionText)\`, \`tab.upload(target, [paths])\`, \`tab.download(target)\`, \`tab.wait({ url?, load?, selector? })\`, \`tab.dialog(accept, promptText?)\`, \`tab.navigate(url)\`, \`tab.back()\`, \`tab.reload()\`, \`tab.snapshot()\`, \`tab.screenshot()\`, \`await tab.evaluate(expression)\` (parsed JSON).
 - Tabs you open close when your turn ends; \`await tab.keep()\` keeps one that holds the result.
@@ -395,7 +395,7 @@ export function createCuaApi(native, activeOutput) {
   }
   const browserApi = Object.freeze({
     async open(url, options = {}) {
-      const { text } = await browser("open", { url });
+      const { text } = await browser("open", { url, ...pick(options, { profile: "profile" }) });
       if (options.emit !== false) activeOutput().write(text, "cua.browser");
       return tabBinding(Number(/Tab (\d+) opened/.exec(text)?.[1]));
     },
@@ -405,7 +405,7 @@ export function createCuaApi(native, activeOutput) {
       return tabBinding(tab);
     },
     async tabs(options = {}) {
-      const { text } = await browser("tabs");
+      const { text } = await browser("tabs", pick(options, { profile: "profile" }));
       if (options.emit !== false) activeOutput().write(text, "cua.browser");
       return text;
     },

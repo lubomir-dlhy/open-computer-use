@@ -3,6 +3,7 @@
 const NATIVE_HOST_NAME = "sk.lubomirdlhy.opencomputeruse.browser";
 const NATIVE_HOST_STATUS_KEY = "OCU_BROWSER_NATIVE_HOST_STATUS";
 const SESSION_STATE_KEY = "OCU_BROWSER_SESSION_STATE";
+const PROFILE_TOKEN_KEY = "OCU_BROWSER_PROFILE_TOKEN";
 const RECONNECT_ALARM_NAME = "ocu-browser-native-reconnect";
 const HEARTBEAT_ALARM_NAME = "ocu-browser-heartbeat";
 const DEFAULT_CDP_TIMEOUT_MS = 10_000;
@@ -186,7 +187,8 @@ class BrowserBackend {
       name: "Open Computer Use Browser",
       version: chrome.runtime.getManifest().version,
       extensionId: chrome.runtime.id,
-      nativeHostName: NATIVE_HOST_NAME
+      nativeHostName: NATIVE_HOST_NAME,
+      profileToken: await profileToken()
     };
   }
 
@@ -644,6 +646,15 @@ function requireNonEmptyString(value, message) {
   return value;
 }
 
+// Open Computer Use finds this token in the profile's storage files to tell which profile it is.
+async function profileToken() {
+  const stored = (await chrome.storage.local.get(PROFILE_TOKEN_KEY))[PROFILE_TOKEN_KEY];
+  if (stored) return stored;
+  const token = `ocu-profile-${crypto.randomUUID()}`;
+  await chrome.storage.local.set({ [PROFILE_TOKEN_KEY]: token });
+  return token;
+}
+
 async function createBackgroundTab(url) {
   const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
   const window = windows.find((win) => win.focused) ?? windows[0];
@@ -719,6 +730,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.downloads.onCreated.addListener((item) => backend.handleDownloadCreated(item));
 chrome.downloads.onChanged.addListener((delta) => backend.handleDownloadChanged(delta));
 chrome.alarms.create(HEARTBEAT_ALARM_NAME, { periodInMinutes: 0.5 }).catch(() => {});
+// Wakes the worker, and with it the native connection, as soon as the profile starts.
+chrome.runtime.onStartup.addListener(() => {});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM_NAME) {
     safeSendNotification(peer, "heartbeat", { at: new Date().toISOString() });

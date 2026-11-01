@@ -68,6 +68,8 @@ Work without bringing apps forward or touching the user's windows:
   for reads; do not use it to change the page instead of acting on it. Tabs you open close when your turn
   ends: if the tab holds the result the user asked for (a submitted form, an opened page), call
   `{"action":"keep"}` before you finish. To work in a tab the user already has open, `tabs` then `claim`.
+  Open tabs in the Chrome profile whose account the task belongs to: pass `profile` (the parameter lists the
+  user's profiles, notes and default), e.g. an organisation's work in its profile, personal tasks in the default.
   If `browser` says Chrome is not connected, fall back to the window recipe below.
 - **Your own browser window:** never reuse or click the user's tabs. Open a window with
   `menu_path: ["File", "New window"]`; Open Computer Use switches to it and stays on it. `set_value` the address bar,

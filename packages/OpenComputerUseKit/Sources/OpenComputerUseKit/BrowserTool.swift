@@ -31,14 +31,15 @@ final class BrowserTool {
         }
         switch action {
         case "tabs":
-            return try listTabs()
+            return try listTabs(profile: arguments["profile"] as? String)
         case "open":
             let url = try string("url", arguments)
-            let tab = try bridge.call("createTab", ["url": url]) as? [String: Any] ?? [:]
+            let tab = try bridge.call("createTab", ["url": url], profile: arguments["profile"] as? String) as? [String: Any] ?? [:]
             guard let id = tab["id"] as? Int else { throw ComputerUseError.stateUnavailable("Chrome did not open a tab") }
             bridge.session { $0.currentTab = id }
             waitForLoad(id, timeout: wait(arguments, default: 15))
-            return try page(id, arguments, note: "Tab \(id) opened in the background. It closes when your turn ends unless you keep it (action keep).")
+            let place = bridge.profile(ofTab: id).map { " in profile \($0.label)" } ?? ""
+            return try page(id, arguments, note: "Tab \(id) opened in the background\(place). It closes when your turn ends unless you keep it (action keep).")
         case "claim":
             let id = try int("tab", arguments)
             _ = try bridge.call("claimUserTab", ["tabId": id])
@@ -361,21 +362,37 @@ final class BrowserTool {
         }
     }
 
-    private func listTabs() throws -> ToolCallResult {
-        let mine = try bridge.call("getTabs") as? [[String: Any]] ?? []
-        let all = try bridge.call("getUserTabs") as? [[String: Any]] ?? []
-        let mineIDs = Set(mine.compactMap { $0["id"] as? Int })
+    private func listTabs(profile query: String?) throws -> ToolCallResult {
+        var profiles = try bridge.profiles()
+        if let query {
+            let known = profiles.compactMap(\.profile)
+            guard let match = BrowserProfiles.select(query, from: known) else {
+                throw ComputerUseError.invalidArguments("no connected Chrome profile matches \"\(query)\"; connected: \(known.map(\.label).joined(separator: ", "))")
+            }
+            profiles = profiles.filter { $0.profile == match }
+        }
         let current = bridge.session { $0.currentTab }
-        var lines = ["Your tabs:"]
-        lines += mine.map { tab in
-            let id = tab["id"] as? Int ?? 0
-            return "  \(id)\(id == current ? " (current)" : "") \(tab["origin"] as? String == "agent" ? "opened" : "claimed") \(json(tab["title"] as? String ?? "")) \(tab["url"] as? String ?? "")"
+        let preferred = BrowserProfiles.defaultProfile(among: profiles.compactMap(\.profile))
+        var lines: [String] = []
+        for entry in profiles {
+            if profiles.count > 1 || query != nil {
+                let label = entry.profile.map { $0.label + ($0.note.map { " — \($0)" } ?? "") + ($0 == preferred ? " [default]" : "") }
+                lines.append("Profile \(label ?? "unknown"):")
+            }
+            let mineIDs = Set(entry.mine.compactMap { $0["id"] as? Int })
+            lines += entry.mine.map { tab in
+                let id = tab["id"] as? Int ?? 0
+                return "  \(id)\(id == current ? " (current)" : "") yours, \(tab["origin"] as? String == "agent" ? "opened" : "claimed") \(json(tab["title"] as? String ?? "")) \(tab["url"] as? String ?? "")"
+            }
+            lines += entry.all.filter { !mineIDs.contains($0["id"] as? Int ?? -1) }.prefix(40).map { tab in
+                "  \(tab["id"] as? Int ?? 0)\(tab["active"] as? Bool == true ? " (front)" : "") \(json(tab["title"] as? String ?? "")) \(tab["url"] as? String ?? "")"
+            }
         }
-        if mine.isEmpty { lines.append("  none; open a URL or claim a tab") }
-        lines.append("User tabs (claim one to act in it; leave the others alone):")
-        lines += all.filter { !mineIDs.contains($0["id"] as? Int ?? -1) }.prefix(40).map { tab in
-            "  \(tab["id"] as? Int ?? 0)\(tab["active"] as? Bool == true ? " (front)" : "") \(json(tab["title"] as? String ?? "")) \(tab["url"] as? String ?? "")"
+        let offline = BrowserProfiles.installed().filter { installed in !profiles.contains { $0.profile?.directory == installed.directory } }
+        if query == nil, !offline.isEmpty {
+            lines.append("Not running in Chrome (the user must open a window in it once): \(offline.map(\.label).joined(separator: ", "))")
         }
+        lines.append("Claim a user tab to act in it; leave the others alone.")
         return .text(lines.joined(separator: "\n"))
     }
 

@@ -237,12 +237,13 @@ public enum ToolDefinitions {
         ),
         ToolDefinition(
             name: "browser",
-            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
+            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab, in the profile that fits the task) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
                     "action": stringProperty(enumValues: BrowserTool.actions),
                     "tab": integerProperty(description: "Tab id; defaults to the tab you used last"),
+                    "profile": stringProperty(description: BrowserProfiles.parameterDescription()),
                     "url": stringProperty(description: "open, navigate; wait: a URL fragment to wait for"),
                     "ref": integerProperty(description: "Element ref from the snapshot"),
                     "selector": stringProperty(description: "CSS selector instead of ref (searches open shadow roots and same-origin frames)"),

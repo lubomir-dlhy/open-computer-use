@@ -17,9 +17,15 @@ MCP client ── browser tool ── BrowserBridge ──unix socket──▶ o
 - `BrowserNativeHost.swift`: Chrome starts `open-computer-use` with the extension origin as its argument. The host
   relays native messages to clients on `~/Library/Application Support/OpenComputerUse/Browser/<pid>.sock`,
   renumbering request ids so several MCP sessions share one extension connection.
-- `BrowserBridge.swift`: one socket per process; session id `ocu-<pid>-<session>`. At turn end it calls
-  `finalizeTabs`: tabs the agent opened close, claimed user tabs are released (ungrouped), kept tabs stay. On
-  connect it finalizes sessions whose process has exited.
+- `BrowserBridge.swift`: Chrome starts one host per profile, so the bridge keeps one socket per profile; session
+  id `ocu-<pid>-<session>`. A call goes to the profile that owns its tab, else the `profile` argument, else the
+  profile of the session's current tab, else the default profile. At turn end it calls `finalizeTabs` in every
+  profile: tabs the agent opened close, claimed user tabs are released (ungrouped), kept tabs stay. On connect it
+  finalizes sessions whose process has exited.
+- `BrowserProfiles.swift`: tells which profile a connection is. The extension keeps a random token in
+  `chrome.storage.local` and returns it from `getInfo`; the bridge finds the profile folder whose
+  `Local Extension Settings/<id>` holds it, then reads the name and email from Chrome's `Local State`. This works
+  for profiles that are not signed in.
 - `BrowserTool.swift` / `BrowserPageScript.swift`: actions. A page script (installed once per document) renders a
   snapshot of `[ref] role "name" state` lines plus visible text; refs stay stable for an element's lifetime, so
   actions return a diff (`~` changed, `+` added, `-` removed), the full snapshot after a navigation.
@@ -41,6 +47,30 @@ MCP client ── browser tool ── BrowserBridge ──unix socket──▶ o
 | `download` | Optionally clicks, then waits for the next download to finish and reports its path. |
 | `evaluate` | Runs JavaScript in the page and returns its JSON value. |
 
+## Profiles
+
+The `profile` argument (on `open` and `tabs`; `cua.browser.open(url, { profile })` in `js`) takes a profile's name,
+email or folder. Its schema description lists the profiles that have the extension, with the user's notes and the
+default, so an agent picks the profile that matches the task's account without a lookup call. `tabs` lists tabs per
+profile and names installed profiles that are not running.
+
+`~/Library/Application Support/OpenComputerUse/browser-profiles.json` holds the default and the notes:
+
+```json
+{
+  "default": "me@gmail.com",
+  "notes": { "me@work.com": "Work: company Google Workspace, Jira" }
+}
+```
+
+`OPEN_COMPUTER_USE_BROWSER_PROFILE` overrides the default. Without either, a call with no tab and no profile goes to
+the first connected profile.
+
+A profile's extension runs only while Chrome has the profile loaded. The manifest asks for the `background`
+permission, so Chrome keeps such profiles loaded with no window open and loads them at startup. A profile that is
+not running yet (installed but never opened since Chrome started) needs one window opened by the user; opening
+one programmatically brings Chrome forward, so the bridge reports it instead.
+
 ## Background behaviour
 
 Nothing here activates Chrome: tab creation is `active: false`, navigation goes through `chrome.tabs.update`, and
@@ -52,4 +82,5 @@ debugging this browser" bar while the debugger is attached; the extension detach
 
 `open-computer-use browser-setup` registers the native host for the installed binary and copies the extension to
 `~/Library/Application Support/OpenComputerUse/BrowserExtension`; load that folder with **Load unpacked** in
-`chrome://extensions` (Developer mode). See the extension README for removal.
+`chrome://extensions` (Developer mode), once in each profile that should be reachable. See the extension README for
+removal.
