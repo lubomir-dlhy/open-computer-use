@@ -50,6 +50,27 @@ controls by text and/or role without rendering a tree or taking a screenshot.
 - On macOS, keep every interaction in the background: never raise, activate or un-minimize the user's windows, and avoid app shortcuts that bring a window forward (Chrome `cmd+l`). Prefer `sky_click`, `drag_method: "sky"` and `sky_key` for Chromium/Electron. See "Staying in the Background" in `references/usage.md`.
 - On Windows and Linux, confirm the command is running inside the logged-in desktop session before assuming GUI automation is available.
 
+## Background Recipes (macOS)
+
+Work without bringing apps forward or touching the user's windows:
+
+- **Menus:** `click` with `menu_path`, e.g. `{"app": "Google Chrome", "menu_path": ["File", "New window"]}`, presses a
+  menu bar item without opening the menu. Titles are case-insensitive and a unique prefix is enough
+  (`["File", "Compress"]` in Finder). Use `["Apple", "About This Mac"]` for the Apple menu. Do not click menu bar
+  items to open them; an open menu covers the user's screen and captures their typing.
+- **Your own browser window:** never reuse or click the user's tabs. Open a window with
+  `menu_path: ["File", "New window"]`; Open Computer Use switches to it and stays on it. `set_value` the address bar,
+  then `press_key` `Return`. Close it with its `close button` element when done (the File > Close Window menu item
+  is disabled while the app is in the background).
+- **Windows:** `get_app_state` lists the app's other windows; pass `window_id` to read a specific one. Later actions
+  stay on that window.
+- **Apps without a window:** `get_app_state` asks the app to show one in the background (on the agent display).
+- **Context menus:** `click` with `"mouse_button": "right"` on an element index (default `click_method`) opens its
+  menu; the menu items then appear in the result as `+` lines, so click the item by index.
+- **Keys:** `press_key` delivers through SkyLight while the app is in the background, so shortcuts and `Return`
+  reach Chromium and AppKit menus. Do not force `click_method: "app_post"`/`"sky_click"` on elements that have an
+  index; the default tries accessibility first.
+
 ## Secrets (macOS)
 
 When a password or other secret is provided as an environment variable of the Open Computer Use

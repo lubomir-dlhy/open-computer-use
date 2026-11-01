@@ -53,6 +53,12 @@ public final class ComputerUseToolDispatcher {
     }
 
     private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        if name == "batch" || Self.actionTools.contains(name),
+           let app = arguments["app"] as? String,
+           let target = try? AppDiscovery.resolveRunning(app) {
+            ForegroundGuard.shared.arm(targetPID: target.pid)
+        }
+        defer { ForegroundGuard.shared.disarm() }
         if name == "batch" {
             return try callBatch(arguments: arguments)
         }
@@ -158,6 +164,11 @@ public final class ComputerUseToolDispatcher {
                 ),
                 windowID: try validatedQueryWindowID(arguments["window_id"])
             )
+        case "click" where arguments["menu_item"] != nil:
+            guard let item = arguments["menu_item"] as? String, let elementIndex = optionalElementIndex(in: arguments) else {
+                throw ComputerUseError.invalidArguments("menu_item needs element_index: it picks an item from that element's context menu")
+            }
+            return try service.chooseContextMenuItem(app: requireString("app", in: arguments), elementIndex: elementIndex, item: item)
         case "click" where arguments["menu_path"] != nil:
             guard let path = arguments["menu_path"] as? [String], arguments["element_index"] == nil, arguments["x"] == nil else {
                 throw ComputerUseError.invalidArguments("menu_path must be an array of menu titles, used without element_index or x/y")

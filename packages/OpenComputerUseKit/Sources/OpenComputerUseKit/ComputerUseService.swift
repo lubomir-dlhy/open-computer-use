@@ -895,6 +895,69 @@ public final class ComputerUseService {
         return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
     }
 
+    /// Pressing twice through accessibility is not a double-click: "double-click to
+    /// open/edit" handlers need mouse events carrying the click count.
+    private func performMultiClick(
+        on record: ElementRecord,
+        windowPoint: CGPoint,
+        targetPoint: CGPoint,
+        clickCount: Int,
+        elementIndex: String,
+        snapshot: AppSnapshot
+    ) throws {
+        if clickCount == 2, let element = record.element,
+           try performAction(named: "AXOpen", on: element, availableActions: record.rawActions) {
+            return
+        }
+        // SkyLight gives the target synthetic focus, so a background window takes the
+        // clicks instead of treating the first one as an activation click.
+        try performExplicitMouseClick(
+            method: SkyLightSPI.shared.capability.isAvailable ? .skyClick : .appPost,
+            modifiers: [],
+            at: targetPoint,
+            windowPoint: windowPoint,
+            button: .left,
+            clickCount: clickCount,
+            targetDescription: "element_index=\(elementIndex)",
+            snapshot: snapshot
+        )
+    }
+
+    /// Opens an element's context menu and picks an item in one call, so the menu,
+    /// which captures the keyboard while open, is up only for a moment.
+    public func chooseContextMenuItem(app query: String, elementIndex: String, item: String) throws -> ToolCallResult {
+        let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+        guard let element = record.element else {
+            throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
+        }
+        guard try performAction(named: kAXShowMenuAction as String, on: element, availableActions: copyActions(for: element) ?? record.rawActions) else {
+            throw ComputerUseError.message("element \(elementIndex) has no context menu (no AXShowMenu action)")
+        }
+        let deadline = Date().addingTimeInterval(1)
+        var menu: AXUIElement?
+        while menu == nil, Date() < deadline {
+            menu = copyChildren(of: element).first { stringValue(of: $0, attribute: kAXRoleAttribute) == kAXMenuRole as String }
+            if menu == nil { Thread.sleep(forTimeInterval: 0.03) }
+        }
+        guard let menu else {
+            throw ComputerUseError.message("element \(elementIndex)'s context menu did not appear in the accessibility tree")
+        }
+        let items = copyChildren(of: menu)
+        let titles = items.map { stringValue(of: $0, attribute: kAXTitleAttribute) ?? "" }
+        guard let index = MenuPath.match(item, in: titles) else {
+            _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+            throw ComputerUseError.invalidArguments("context menu has no unique item \(item.debugDescription). Items: \(titles.filter { !$0.isEmpty }.joined(separator: ", "))")
+        }
+        AXUIElementSetMessagingTimeout(items[index], 1)
+        let result = AXUIElementPerformAction(items[index], kAXPressAction as CFString)
+        guard result == .success || result == .cannotComplete else {
+            _ = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+            throw ComputerUseError.message("Pressing context menu item \(item) failed with \(result.rawValue)")
+        }
+        return try actionResult(for: query, recoveryPolicy: .readOnly)
+    }
+
     /// Presses a menu bar item by its titles, without opening the menu on screen.
     public func pressMenuItem(app query: String, path: [String]) throws -> ToolCallResult {
         try requireUsableComputerUseSession()
@@ -987,6 +1050,9 @@ public final class ComputerUseService {
 
             do {
                 switch clickMethod {
+                case .auto where clickCount >= 2 && button == .left:
+                    try performMultiClick(on: record, windowPoint: windowPoint, targetPoint: targetPoint,
+                                          clickCount: clickCount, elementIndex: elementIndex, snapshot: snapshot)
                 case .auto:
                     if !(try performAXClickSequence(
                         on: record,
@@ -1337,6 +1403,10 @@ public final class ComputerUseService {
 
         do {
             try requireUsableComputerUseSession()
+            // Focus the field first so a following Return or Tab reaches it, not the page.
+            if isSettable(element: element, attribute: kAXFocusedAttribute) {
+                _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            }
             let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, setValuePayload(value, for: element))
             guard result == .success else {
                 throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")

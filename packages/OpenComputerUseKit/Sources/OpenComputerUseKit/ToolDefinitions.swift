@@ -47,6 +47,7 @@ public enum ToolDefinitions {
                         enumValues: ClickMethod.allCases.map(\.rawValue)
                     ),
                     "modifiers": stringArrayProperty(description: "Held during the click (sky_click only)", enumValues: modifierNames),
+                    "menu_item": stringProperty(description: "With element_index: open the element's context menu and choose this item in one step (preferred over a right-click then a second click)."),
                     "menu_path": [
                         "type": "array",
                         "items": ["type": "string"],
