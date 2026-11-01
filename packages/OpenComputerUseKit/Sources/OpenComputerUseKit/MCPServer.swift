@@ -3,7 +3,7 @@ import Foundation
 let computerUseServerInstructions = """
 Computer Use tools operate macOS apps in the background, so the user can keep using their computer. Don't disrupt their session, for example by overwriting the clipboard, unless they ask. If an app has a dedicated plugin or skill that can do the task, prefer it.
 
-Call `get_app_state` at the start of every turn before acting; the session stops after each assistant turn. If a tool is missing, surface it with tool_search.
+Call `get_app_state` at the start of every turn before acting; the session stops after each assistant turn. For web pages in Chrome use the `browser` tool instead, which needs no `get_app_state`. If a tool is missing, surface it with tool_search.
 
 An action returns only what changed since the state you last saw: `~` changed, `+` added (`(in N)` names the parent), `-` removed. Element indices stay stable until the next `get_app_state`, which renumbers the tree. Every action also takes state ("diff" by default, "full" for the whole tree, "none" for just ok), screenshot (true attaches one), wait_for (text to wait for in the tree; "!text" waits until it is gone) and wait_timeout (seconds, default 5). Use `batch` for several steps in one call, and `get_app_state` for the full picture.
 
@@ -138,6 +138,7 @@ public final class StdioMCPServer {
         service.clearQueryIndexes()
         // Done or failed, the agent's own windows go away before others may claim the app.
         SessionOwner.with(sessionID) { _ = service.closeOpenedWindows() }
+        BrowserBridge.shared.endTurn(owner: sessionID)
         AgentLeases.shared.release(session: sessionID)
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()

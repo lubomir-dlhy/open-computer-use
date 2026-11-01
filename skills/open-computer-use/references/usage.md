@@ -123,6 +123,19 @@ macOS actions return only what changed since the state the agent last saw. `~` i
 
 `OPEN_COMPUTER_USE_ACTION_RESULT=full` in the server environment restores the previous results (whole tree plus screenshot). See `docs/lean-action-results.md` in the repository.
 
+`get_app_state` attaches a screenshot only the first time you see a window, or when its tree is too thin to act on; pass `include_screenshot: true` for one. `scroll` also takes `x`/`y`, `click` and `press_key` take `hold` (seconds), and `type_text` with `paste: true` pastes `text`, `html` or `markdown` (`format`) and restores the user's clipboard.
+
+## Chrome (`browser` tool)
+
+Needs the Open Computer Use Browser extension (`open-computer-use browser-setup`, then Load unpacked in `chrome://extensions`). Everything runs in background tabs through Chrome's debugger: Chrome is never activated and the user's visible tab never changes.
+
+- `{"action": "open", "url": "https://…"}` opens a background tab and returns a snapshot: `[ref] role "name" state` lines plus visible text. Later calls default to that tab (`tab` picks another).
+- Target elements by `ref`, `selector` or `name` (visible text); `x`/`y` are viewport CSS pixels.
+- `click` (`click_count`, `button`, `modifiers`, `hold`, `force`), `hover`, `type` (`text` or `secret_env`, `clear`, `format`), `key` (`Enter`, `cmd+a`, …), `scroll` (`direction`, `amount`), `select` (native `<select>`), `drag` (`to_ref`/`to_selector`/`to_name`/`to_x`+`to_y`; HTML5 drag-and-drop works), `upload` (`files`), `download`, `evaluate` (`expression`).
+- Results are diffs against the last snapshot; a navigation returns the new page. `wait_for` / `wait_timeout` work as in native actions; `wait` also takes `url`, `load` and `selector`.
+- A JS dialog is reported by the next action; answer with `{"action": "dialog", "accept": true}` (`text` for a prompt).
+- Tabs you open close at the end of the turn. `{"action": "keep"}` keeps the current tab (`status: "handoff"` to continue later). `tabs` lists yours and the user's; `claim` takes one of the user's tabs, released at the end of the turn. `show` brings a tab forward only when the user wants to watch.
+
 ## Direct CLI Tool Calls
 
 Use `call` for one-off checks:

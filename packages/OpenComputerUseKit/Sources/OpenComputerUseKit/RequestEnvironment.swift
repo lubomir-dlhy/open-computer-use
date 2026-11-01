@@ -17,3 +17,23 @@ public enum RequestEnvironment {
         return try body()
     }
 }
+
+/// How long the current call holds a click's button or a key down before release.
+enum InputHold {
+    private static let key = "ocu.input-hold"
+
+    static var seconds: TimeInterval {
+        Thread.current.threadDictionary[key] as? TimeInterval ?? 0
+    }
+
+    static func with<T>(_ seconds: TimeInterval, _ body: () throws -> T) rethrows -> T {
+        let previous = Thread.current.threadDictionary[key]
+        Thread.current.threadDictionary[key] = seconds
+        defer { Thread.current.threadDictionary[key] = previous }
+        return try body()
+    }
+
+    static func pause() {
+        if seconds > 0 { Thread.sleep(forTimeInterval: seconds) }
+    }
+}

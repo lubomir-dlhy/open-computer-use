@@ -14,6 +14,8 @@
   实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
+- `apps/OpenComputerUseBrowserExtension`
+  Chrome MV3 扩展（改编自 open-browser-use，MIT），通过 `chrome.debugger` 在后台驱动 Chrome 标签页；经 native messaging（`sk.lubomirdlhy.opencomputeruse.browser`）连接 `open-computer-use` 二进制。详见 `docs/browser-control.md`。
 - `packages/OpenComputerUseKit`
   核心库，包含：
   - MCP stdio transport 与 tool registry

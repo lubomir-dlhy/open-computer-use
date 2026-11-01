@@ -618,6 +618,7 @@ func shouldPreferContainingWebRowAXClickCandidate(
 
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
+    private var screenshotWindows: Set<CGWindowID> = []
     private var invalidatedSnapshotAliases: Set<String> = []
     // Defaults are read per call: the app agent applies the caller's OPEN_COMPUTER_USE_*
     // variables for the duration of each request.
@@ -897,14 +898,18 @@ public final class ComputerUseService {
         treeLimits: AccessibilityTreeLimits = .defaults,
         windowPlacement: WindowPlacement = .keep,
         observation: SnapshotObservationOptions = .defaults,
-        windowID: CGWindowID? = nil
+        windowID: CGWindowID? = nil,
+        autoScreenshot: Bool = false
     ) throws -> ToolCallResult {
         try observation.validate()
         guard windowPlacement != .keep else {
-            return snapshotResult(
-                for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation, windowID: windowID),
-                style: .fullState
-            )
+            guard autoScreenshot, observation.includeAX else {
+                return snapshotResult(
+                    for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation, windowID: windowID),
+                    style: .fullState
+                )
+            }
+            return try autoScreenshotState(app: query, textLimit: textLimit, treeLimits: treeLimits, windowID: windowID)
         }
 
         // Explicit placements never activate or raise; they only move the frame.
@@ -932,6 +937,33 @@ public final class ComputerUseService {
         }
 
         return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
+    }
+
+    /// A screenshot only on first contact with a window or when its tree is too thin
+    /// to act on; otherwise the tree alone, keeping coordinates from the last capture.
+    private func autoScreenshotState(app query: String, textLimit: SnapshotTextLimit, treeLimits: AccessibilityTreeLimits,
+                                     windowID: CGWindowID?) throws -> ToolCallResult {
+        let previous = snapshotsByApp[query.lowercased()]
+        var snapshot = try snapshotParkingMinimizedWindow(
+            for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation,
+            observation: SnapshotObservationOptions(includeAX: true, includeScreenshot: false), windowID: windowID)
+        guard snapshot.mode == .accessibility else { return snapshotResult(for: snapshot, style: .fullState) }
+        let indexed = snapshot.treeLines.filter { $0.trimmingCharacters(in: .whitespaces).first?.isNumber == true }.count
+        let firstContact = snapshot.targetWindowID.map { !screenshotWindows.contains($0) } ?? true
+        if firstContact || indexed < 12, let capture = SnapshotBuilder.captureScreenshot(of: snapshot) {
+            snapshot.screenshotData = capture.data
+            snapshot.screenshotNote = capture.note
+            snapshot.observation.includeScreenshot = true
+            if let windowID = snapshot.targetWindowID { screenshotWindows.insert(windowID) }
+        } else {
+            snapshot.screenshotNote = "No screenshot: you have seen this window (include_screenshot true for one)."
+            if let previous, let size = screenshotPixelSize(snapshot: previous),
+               previous.targetWindowID == snapshot.targetWindowID, previous.windowBounds?.size == snapshot.windowBounds?.size {
+                snapshot.carriedScreenshotPixelSize = size
+            }
+        }
+        rememberSnapshot(snapshot, for: query)
+        return snapshotResult(for: snapshot, style: .fullState)
     }
 
     /// Selects the outline or table row an element belongs to (Finder lists, Mail
@@ -1460,6 +1492,29 @@ public final class ComputerUseService {
         return try actionResult(for: query)
     }
 
+    public func scroll(app query: String, direction: String, x: Double, y: Double, pages: Double) throws -> ToolCallResult {
+        let normalized = direction.lowercased()
+        guard ["up", "down", "left", "right"].contains(normalized) else {
+            throw ComputerUseError.message("Invalid scroll direction: \(direction)")
+        }
+        guard pages.isFinite, pages > 0 else {
+            throw ComputerUseError.message("pages must be > 0")
+        }
+        let snapshot = try currentSnapshot(for: query)
+        guard snapshot.mode == .accessibility, snapshot.acceptsScreenshotCoordinates else {
+            throw ComputerUseError.stateUnavailable("scroll at x/y needs a screenshot of this window; call get_app_state with include_screenshot true")
+        }
+        let windowPoint = try screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: CGPoint(x: x, y: y))
+        try performScrollEvent(
+            at: try windowPointToGlobalPoint(snapshot: snapshot, point: windowPoint),
+            direction: normalized,
+            pages: pages,
+            targetDescription: "x=\(Int(x)), y=\(Int(y))",
+            snapshot: snapshot
+        )
+        return try actionResult(for: query)
+    }
+
     public func drag(
         app query: String,
         fromX: Double,
@@ -1532,6 +1587,18 @@ public final class ComputerUseService {
 
         try InputSimulation.typeText(text, pid: snapshot.app.pid)
         return try actionResult(for: query)
+    }
+
+    /// Pastes through the app's own Paste, then puts the user's clipboard back.
+    public func paste(app query: String, text: String, format: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {
+        let saved = ClipboardSnapshot()
+        try PasteContent.write(text, format: format)
+        defer {
+            // The app reads the pasteboard while handling the key; give a slow one a moment.
+            Thread.sleep(forTimeInterval: 0.3)
+            saved.restore()
+        }
+        return try pressKey(app: query, key: "super+v", keyMethod: keyMethod)
     }
 
     public func pressKey(app query: String, key: String, keyMethod: KeyMethod = .auto) throws -> ToolCallResult {

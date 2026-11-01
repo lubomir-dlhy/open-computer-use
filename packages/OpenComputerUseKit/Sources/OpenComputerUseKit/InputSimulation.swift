@@ -63,6 +63,7 @@ enum InputSimulation {
         for _ in 0..<max(clickCount, 1) {
             try postMouseEvent(type: .mouseMoved, source: source, point: point, button: button.cgButton, clickState: clickCount)
             try postMouseEvent(type: button.downEvent, source: source, point: point, button: button.cgButton, clickState: clickCount)
+            InputHold.pause()
             try postMouseEvent(type: button.upEvent, source: source, point: point, button: button.cgButton, clickState: clickCount)
         }
     }
@@ -75,6 +76,7 @@ enum InputSimulation {
         for _ in 0..<max(clickCount, 1) {
             try postMouseEventToPid(type: .mouseMoved, source: source, point: point, button: button.cgButton, clickState: clickCount, pid: pid)
             try postMouseEventToPid(type: button.downEvent, source: source, point: point, button: button.cgButton, clickState: clickCount, pid: pid)
+            InputHold.pause()
             try postMouseEventToPid(type: button.upEvent, source: source, point: point, button: button.cgButton, clickState: clickCount, pid: pid)
         }
     }
@@ -256,6 +258,7 @@ enum InputSimulation {
         keyDown.flags = activeFlags
         keyUp.flags = activeFlags
         keyDown.postToPid(pid)
+        InputHold.pause()
         keyUp.postToPid(pid)
 
         for modifier in parsed.modifiers.reversed() {

@@ -220,6 +220,7 @@ enum SkyClickDispatcher {
                 // CGEvent.postToPid delivered every event twice.
                 try spi.postToPid(event, pid: target.pid)
 
+                if isTarget, step.kind == .down { InputHold.pause() }
                 let delay = step.delayAfter * InputTiming.skyClickDelayScale
                 if delay > 0 {
                     Thread.sleep(forTimeInterval: delay)

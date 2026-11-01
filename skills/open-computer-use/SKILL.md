@@ -58,6 +58,17 @@ Work without bringing apps forward or touching the user's windows:
   menu bar item without opening the menu. Titles are case-insensitive and a unique prefix is enough
   (`["File", "Compress"]` in Finder). Use `["Apple", "About This Mac"]` for the Apple menu. Do not click menu bar
   items to open them; an open menu covers the user's screen and captures their typing.
+- **Chrome: use the `browser` tool first.** When the Open Computer Use Browser extension is installed it drives
+  Chrome tabs through the debugger, entirely in the background: Chrome never comes forward and no window is
+  touched. `{"action":"open","url":...}` opens a background tab and returns a snapshot of `[ref] role "name"`
+  lines; act with `click`/`hover`/`type`/`key`/`scroll`/`drag`/`select`/`upload` by `ref` (or `selector`, or
+  `name`), and each action returns only what changed. `type` takes `secret_env` like `type_text`. `drag` does
+  real HTML5 drag-and-drop. `wait` waits for `url`, `load` or `selector`; every action takes `wait_for`. A JS
+  `alert`/`confirm` is reported; answer it with `{"action":"dialog","accept":true}`. `evaluate` runs JavaScript
+  for reads; do not use it to change the page instead of acting on it. Tabs you open close when your turn
+  ends: if the tab holds the result the user asked for (a submitted form, an opened page), call
+  `{"action":"keep"}` before you finish. To work in a tab the user already has open, `tabs` then `claim`.
+  If `browser` says Chrome is not connected, fall back to the window recipe below.
 - **Your own browser window:** never reuse or click the user's tabs. Open a window with
   `menu_path: ["File", "New window"]`; Open Computer Use switches to it and stays on it. `set_value` the address bar,
   then `press_key` `Return`. Close it with its `close button` element when done (the File > Close Window menu item

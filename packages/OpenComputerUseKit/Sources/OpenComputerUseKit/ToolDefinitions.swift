@@ -47,6 +47,7 @@ public enum ToolDefinitions {
                         enumValues: ClickMethod.allCases.map(\.rawValue)
                     ),
                     "modifiers": stringArrayProperty(description: "Held during the click (sky_click only)", enumValues: modifierNames),
+                    "hold": holdProperty(),
                     "menu_item": stringProperty(description: "With element_index: open the element's context menu and choose this item in one step (preferred over a right-click then a second click)."),
                     "menu_path": [
                         "type": "array",
@@ -102,7 +103,7 @@ public enum ToolDefinitions {
             inputSchema: objectSchema(
                 properties: [
                     "include_ax": ["type": "boolean", "default": true, "description": "False skips the tree and invalidates element indices"],
-                    "include_screenshot": ["type": "boolean", "default": true, "description": "False skips capture; coordinate actions need a screenshot"],
+                    "include_screenshot": ["type": "boolean", "description": "Default: a screenshot on first contact with a window or when its tree is thin. True always captures; false never does"],
                     "app": appProperty(),
                     "text_limit": textLimitProperty(description: "Max text chars, or \"max\". Default 500"),
                     "max_tree_nodes": positiveIntegerProperty(description: "Default 1200"),
@@ -145,22 +146,25 @@ public enum ToolDefinitions {
                     "app": appProperty(),
                     "key": stringProperty(),
                     "key_method": keyMethodProperty(),
+                    "hold": holdProperty(),
                 ],
                 required: ["app", "key"]
             )
         ),
         ToolDefinition(
             name: "scroll",
-            description: "Scroll an element by pages.",
+            description: "Scroll an element, or the view under x/y in the last screenshot, by pages.",
             annotations: defaultAnnotations(),
             inputSchema: actionSchema(
                 properties: [
                     "app": appProperty(),
                     "direction": stringProperty(description: "up, down, left or right"),
                     "element_index": elementIndexProperty(),
+                    "x": numberProperty(description: "Screenshot pixel X, instead of element_index"),
+                    "y": numberProperty(description: "Screenshot pixel Y"),
                     "pages": numberProperty(description: "Fractional allowed. Default 1"),
                 ],
-                required: ["app", "element_index", "direction"]
+                required: ["app", "direction"]
             )
         ),
         ToolDefinition(
@@ -203,6 +207,8 @@ public enum ToolDefinitions {
                     "text": stringProperty(),
                     "secret_env": secretEnvProperty(),
                     "key_method": keyMethodProperty(),
+                    "paste": ["type": "boolean", "description": "Paste instead of typing; the user's clipboard is restored"],
+                    "format": stringProperty(description: "With paste: text (default), html or markdown (pasted as rich text)", enumValues: ["text", "html", "markdown"]),
                 ],
                 required: ["app"]
             )
@@ -229,6 +235,52 @@ public enum ToolDefinitions {
                 required: ["app", "steps"]
             )
         ),
+        ToolDefinition(
+            name: "browser",
+            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
+            annotations: defaultAnnotations(),
+            inputSchema: objectSchema(
+                properties: [
+                    "action": stringProperty(enumValues: BrowserTool.actions),
+                    "tab": integerProperty(description: "Tab id; defaults to the tab you used last"),
+                    "url": stringProperty(description: "open, navigate; wait: a URL fragment to wait for"),
+                    "ref": integerProperty(description: "Element ref from the snapshot"),
+                    "selector": stringProperty(description: "CSS selector instead of ref (searches open shadow roots and same-origin frames)"),
+                    "name": stringProperty(description: "Visible name or text instead of ref"),
+                    "x": numberProperty(description: "Viewport CSS pixel X instead of an element"),
+                    "y": numberProperty(),
+                    "to_ref": integerProperty(description: "drag destination; also to_selector, to_name, to_x, to_y"),
+                    "to_selector": stringProperty(),
+                    "to_name": stringProperty(),
+                    "to_x": numberProperty(),
+                    "to_y": numberProperty(),
+                    "drag_method": stringProperty(description: "auto (default): a trusted HTML5 drag when the source is draggable, else a pointer drag", enumValues: ["auto", "pointer", "js"]),
+                    "text": stringProperty(description: "type: inserted into the element (focused first) or the focused field; dialog: prompt answer"),
+                    "secret_env": secretEnvProperty(),
+                    "clear": ["type": "boolean", "description": "type: replace the field's current value"],
+                    "format": stringProperty(description: "type: text (default), or html / markdown pasted as rich text", enumValues: ["text", "html", "markdown"]),
+                    "key": stringProperty(description: "e.g. Enter, Tab, Escape, ArrowDown, cmd+a, shift+Tab"),
+                    "button": stringProperty(enumValues: ["left", "right", "middle"]),
+                    "click_count": integerProperty(description: "2 for a double-click"),
+                    "modifiers": stringArrayProperty(description: "Held during the click", enumValues: modifierNames),
+                    "hold": numberProperty(description: "click, key: seconds to hold before release"),
+                    "force": ["type": "boolean", "description": "click even when another element covers the target"],
+                    "direction": stringProperty(enumValues: ["up", "down", "left", "right"]),
+                    "amount": numberProperty(description: "scroll: viewport heights, default 1"),
+                    "value": stringProperty(description: "select: option text or value of a native <select>"),
+                    "files": ["type": "array", "items": ["type": "string"], "description": "upload: absolute file paths"],
+                    "accept": ["type": "boolean", "description": "dialog: true accepts (default), false dismisses"],
+                    "status": stringProperty(description: "keep: deliverable (default) or handoff", enumValues: ["deliverable", "handoff"]),
+                    "expression": stringProperty(description: "evaluate: JavaScript run in the page; promises are awaited and the JSON value returned"),
+                    "load": stringProperty(description: "wait: load state", enumValues: ["domcontentloaded", "load"]),
+                    "max_chars": integerProperty(description: "Snapshot size budget, default 6000"),
+                    "state": stringProperty(description: "diff (default) returns changes; full the whole snapshot; none just ok", enumValues: ["diff", "full", "none"]),
+                    "wait_for": stringProperty(description: "Text to wait for on the page; \"!text\" waits until it is gone"),
+                    "wait_timeout": numberProperty(),
+                ],
+                required: ["action"]
+            )
+        ),
     ]
 }
 
@@ -245,6 +297,10 @@ private func actionSchema(properties: [String: Any], required: [String]) -> [Str
         ]) { current, _ in current },
         required: required
     )
+}
+
+private func holdProperty() -> [String: Any] {
+    numberProperty(description: "Seconds to hold before release")
 }
 
 private func appProperty() -> [String: Any] {

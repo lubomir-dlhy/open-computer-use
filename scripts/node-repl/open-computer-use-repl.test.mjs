@@ -433,3 +433,61 @@ for (const Session of [PersistentJavaScriptSession, WorkerJavaScriptSession]) {
     }
   });
 }
+
+test("actions return their result unshown and forward native options", async () => {
+  const native = mockNative();
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var parityApp = await cua.getApp("Text", { initialState: false });
+    var clicked = await parityApp.click(3, { menuItem: "Archive", waitFor: "Done", state: "none" });
+    await parityApp.menu(["File", "New window"]);
+    await parityApp.typeText(null, { secretEnv: "APP_PASSWORD" });
+    await parityApp.paste("**hi**", { format: "markdown" });
+    await parityApp.scroll([10, 20], "down", 2);
+    await parityApp.pressKey("a", { hold: 0.5 });
+    await parityApp.batch([{ tool: "click", element_index: "1" }]);
+    await parityApp.getAXState({ emit: false, windowId: 77 });
+    nodeRepl.write("got " + clicked);
+  `);
+  assert.equal(result.isError, false);
+  assert.equal(result.content.at(-1).text, "got clicked");
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))), [
+    { app: "Text", element_index: 3, menu_item: "Archive", wait_for: "Done", state: "none" },
+    { app: "Text", menu_path: ["File", "New window"] },
+    { app: "Text", secret_env: "APP_PASSWORD" },
+    { app: "Text", text: "**hi**", paste: true, format: "markdown" },
+    { app: "Text", x: 10, y: 20, direction: "down", pages: 2 },
+    { app: "Text", key: "a", hold: 0.5 },
+    { app: "Text", steps: [{ tool: "click", element_index: "1" }] },
+    { app: "Text", window_id: 77 },
+  ]);
+});
+
+test("cua.browser binds a tab and maps targets", async () => {
+  const native = mockNative();
+  native.request = async (method, params) => {
+    native.calls.push(params);
+    const action = params.arguments.action;
+    if (action === "open") return textResult("Tab 42 opened in the background.\npage");
+    if (action === "evaluate") return textResult('{"a":1}');
+    return textResult(`did ${action}`);
+  };
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var tab = await cua.browser.open("https://example.test", { emit: false });
+    await tab.click(5);
+    await tab.type("#name", "Ada", { clear: true });
+    await tab.drag({ name: "A" }, "#b");
+    var value = await tab.evaluate("1");
+    nodeRepl.write(String(tab.id) + " " + value.a);
+  `);
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content.map(item => item.text), ["42 1"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))), [
+    { action: "open", url: "https://example.test" },
+    { action: "click", tab: 42, ref: 5 },
+    { action: "type", tab: 42, selector: "#name", text: "Ada", clear: true },
+    { action: "drag", tab: 42, name: "A", to_selector: "#b" },
+    { action: "evaluate", tab: 42, expression: "1" },
+  ]);
+});

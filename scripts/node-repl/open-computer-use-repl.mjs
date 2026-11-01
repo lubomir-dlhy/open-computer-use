@@ -42,14 +42,26 @@ The runtime exposes an asynchronous app-bound API:
 - \`await app.getScreenshot({ emit? })\`
 - \`await app.getAXStateAndScreenshot(options?)\`
 - Optional observation on macOS, Windows and Linux: \`app.getScreenshot({ includeAX: false })\` skips AX/focus/selection and invalidates prior element indexes; refresh AX before element actions. \`app.getAXState({ includeScreenshot: false })\` skips capture; screenshot-coordinate actions require a fresh screenshot. Omitted options retain full native observation.
-- \`await app.click(elementIndexOrPoint, { mouseButton?, clickCount?, clickMethod? })\`
-- \`await app.scroll(elementIndex, direction, pages?)\`
-- \`await app.drag([fromX, fromY], [toX, toY])\`
-- \`await app.typeText(text, { keyMethod? })\`
-- \`await app.pressKey(key, { keyMethod? })\`
-- \`await app.setValue(elementIndex, value)\`
+- \`await app.click(elementIndexOrPoint, { mouseButton?, clickCount?, clickMethod?, modifiers?, menuItem?, hold? })\`
+- \`await app.menu(["File", "New window"])\`: press a menu bar item without opening the menu.
+- \`await app.scroll(elementIndexOrPoint, direction, pages?)\`
+- \`await app.drag([fromX, fromY], [toX, toY], { dragMethod?, modifiers? })\`
+- \`await app.typeText(text, { keyMethod?, secretEnv? })\`: secretEnv names an environment variable typed instead of text, never shown.
+- \`await app.paste(text, { format? })\`: paste text, "html" or "markdown", then restore the user's clipboard.
+- \`await app.pressKey(key, { keyMethod?, hold? })\`
+- \`await app.setValue(elementIndex, value, { secretEnv? })\`
+- \`await app.batch([{ tool: "click", element_index: "3" }, { tool: "press_key", key: "Return" }])\`: several steps, one result.
 - \`await app.selectText(elementIndex, text, { prefix?, suffix?, selection? })\`: macOS-only; selection is text (default), cursor_before or cursor_after. Ambiguous text and unverified selections throw.
 - \`await app.performSecondaryAction(elementIndex, action)\`
+
+Every action returns what changed as text (\`~\` changed, \`+\` added, \`-\` removed) without showing it, so a script can branch on it; pass \`{ emit: true }\` to show it, and \`state\` ("diff", "full", "none"), \`waitFor\` (text, or "!text" until gone) and \`waitTimeout\` as in the native tools. \`getAXState({ emit: false })\` reads without showing.
+
+Chrome, through the Open Computer Use Browser extension (background tabs; Chrome never comes forward):
+
+- \`const tab = await cua.browser.open(url)\` shows a snapshot of \`[ref] role "name"\` lines (\`{ emit: false }\` hides it); also \`await cua.browser.tabs()\` and \`await cua.browser.claim(tabId)\`.
+- Targets: a ref number, a CSS selector string, \`[x, y]\`, or \`{ name: "Submit" }\`.
+- \`tab.click(target, { clickCount?, button?, modifiers?, hold? })\`, \`tab.hover(target)\`, \`tab.type(target, text, { clear?, secretEnv?, format? })\`, \`tab.key("Enter")\`, \`tab.scroll(target, "down", 1)\`, \`tab.drag(from, to)\` (real HTML5 drag-and-drop), \`tab.select(target, optionText)\`, \`tab.upload(target, [paths])\`, \`tab.download(target)\`, \`tab.wait({ url?, load?, selector? })\`, \`tab.dialog(accept, promptText?)\`, \`tab.navigate(url)\`, \`tab.back()\`, \`tab.reload()\`, \`tab.snapshot()\`, \`tab.screenshot()\`, \`await tab.evaluate(expression)\` (parsed JSON).
+- Tabs you open close when your turn ends; \`await tab.keep()\` keeps one that holds the result.
 
 After actions, call \`getAXState()\` in the same js invocation when the next decision depends on the updated UI. Re-derive element indexes from fresh state after navigation or layout changes. Prefer element indexes over coordinates. Open Computer Use keeps its existing local safety gates, including password-manager denial and explicit authorization for global pointer fallbacks.`;
 
@@ -255,6 +267,8 @@ export function parseListApps(text) {
 
 function optionsToSnapshotArgs(options = {}) {
   const args = {};
+  if (options.windowId !== undefined) args.window_id = options.windowId;
+  if (options.keepWindow !== undefined) args.keep_window = options.keepWindow;
   if (options.textLimit !== undefined) args.text_limit = options.textLimit;
   if (options.maxTreeNodes !== undefined) args.max_tree_nodes = options.maxTreeNodes;
   if (options.maxTreeDepth !== undefined) args.max_tree_depth = options.maxTreeDepth;
@@ -282,7 +296,31 @@ function optionsToClickArgs(options = {}) {
 function optionsToKeyArgs(options = {}) {
   const args = {};
   if (options.keyMethod !== undefined) args.key_method = options.keyMethod;
+  if (options.hold !== undefined) args.hold = options.hold;
   return args;
+}
+
+// Result options every native action takes; the result text is returned, not emitted.
+function optionsToActionArgs(options = {}) {
+  if (!isPlainObject(options)) throw new Error("options must be an object");
+  const args = {};
+  for (const [option, argument] of [["state", "state"], ["screenshot", "screenshot"], ["waitFor", "wait_for"], ["waitTimeout", "wait_timeout"]]) {
+    if (options[option] !== undefined) args[argument] = options[option];
+  }
+  return args;
+}
+
+function browserTarget(target, prefix = "") {
+  if (typeof target === "number") return { [`${prefix}ref`]: target };
+  if (typeof target === "string") return { [`${prefix}selector`]: target };
+  if (Array.isArray(target)) return { [`${prefix}x`]: target[0], [`${prefix}y`]: target[1] };
+  if (isPlainObject(target)) {
+    const args = {};
+    for (const key of ["ref", "selector", "name"]) if (target[key] !== undefined) args[`${prefix}${key}`] = target[key];
+    return args;
+  }
+  if (target === undefined || target === null) return {};
+  throw new Error("a browser target is a ref number, a CSS selector string, [x, y], or { ref | selector | name }");
 }
 
 export function createCuaApi(native, activeOutput) {
@@ -300,6 +338,79 @@ export function createCuaApi(native, activeOutput) {
     if (options.emit === false) return;
     for (const image of images) await activeOutput().emitImage({ bytes: Buffer.from(image.data, "base64"), mimeType: image.mimeType ?? "image/png" });
   }
+  // Actions return their result (what changed) for the script to branch on; emit: true also shows it.
+  async function act(tool, args, options = {}) {
+    const text = toolResultText(await call(tool, args));
+    if (options.emit === true) activeOutput().write(text, "cua.action");
+    return text;
+  }
+  async function browser(action, args = {}, options = {}) {
+    const result = await call("browser", { action, ...args, ...optionsToActionArgs(options) });
+    const text = toolResultText(result);
+    if (options.emit === true) activeOutput().write(text, "cua.browser");
+    return { text, images: toolResultImages(result) };
+  }
+  function tabBinding(tab) {
+    const id = { tab };
+    const run = async (action, args, options) => (await browser(action, { ...id, ...args }, options)).text;
+    return Object.freeze({
+      id: tab,
+      async snapshot(options = {}) {
+        const { text } = await browser("snapshot", { ...id, ...(options.maxChars ? { max_chars: options.maxChars } : {}) });
+        if (options.emit !== false) activeOutput().write(text, "cua.browser");
+        return text;
+      },
+      async screenshot(options = {}) {
+        const { images } = await browser("screenshot", id);
+        await emitImages(images, options);
+        return images[0] ? Buffer.from(images[0].data, "base64") : null;
+      },
+      click: (target, options = {}) => run("click", { ...browserTarget(target), ...pick(options, { button: "button", clickCount: "click_count", modifiers: "modifiers", hold: "hold", force: "force" }) }, options),
+      hover: (target, options = {}) => run("hover", browserTarget(target), options),
+      type: (target, text, options = {}) => run("type", { ...browserTarget(target), ...(options.secretEnv !== undefined ? { secret_env: options.secretEnv } : { text }), ...pick(options, { clear: "clear", format: "format" }) }, options),
+      key: (key, options = {}) => run("key", { key, ...pick(options, { hold: "hold" }) }, options),
+      scroll: (target, direction = "down", amount = 1, options = {}) => run("scroll", { ...browserTarget(target), direction, amount }, options),
+      drag: (from, to, options = {}) => run("drag", { ...browserTarget(from), ...browserTarget(to, "to_"), ...pick(options, { dragMethod: "drag_method" }) }, options),
+      select: (target, value, options = {}) => run("select", { ...browserTarget(target), value }, options),
+      upload: (target, files, options = {}) => run("upload", { ...browserTarget(target), files }, options),
+      download: (target, options = {}) => run("download", browserTarget(target), options),
+      wait: (options = {}) => run("wait", pick(options, { url: "url", load: "load", selector: "selector" }), options),
+      dialog: (accept = true, text, options = {}) => run("dialog", { accept, ...(text !== undefined ? { text } : {}) }, options),
+      navigate: (url, options = {}) => run("navigate", { url }, options),
+      back: (options = {}) => run("back", {}, options),
+      forward: (options = {}) => run("forward", {}, options),
+      reload: (options = {}) => run("reload", {}, options),
+      keep: (status = "deliverable") => run("keep", { status }),
+      close: () => run("close", {}),
+      async evaluate(expression) {
+        const { text } = await browser("evaluate", { ...id, expression });
+        try { return JSON.parse(text); } catch { return text; }
+      },
+    });
+  }
+  function pick(options, names) {
+    const args = {};
+    for (const [option, argument] of Object.entries(names)) if (options[option] !== undefined) args[argument] = options[option];
+    return args;
+  }
+  const browserApi = Object.freeze({
+    async open(url, options = {}) {
+      const { text } = await browser("open", { url });
+      if (options.emit !== false) activeOutput().write(text, "cua.browser");
+      return tabBinding(Number(/Tab (\d+) opened/.exec(text)?.[1]));
+    },
+    async claim(tab, options = {}) {
+      const { text } = await browser("claim", { tab });
+      if (options.emit !== false) activeOutput().write(text, "cua.browser");
+      return tabBinding(tab);
+    },
+    async tabs(options = {}) {
+      const { text } = await browser("tabs");
+      if (options.emit !== false) activeOutput().write(text, "cua.browser");
+      return text;
+    },
+    tab: id => tabBinding(id),
+  });
   async function emitDocs() {
     if (docsEmitted) return;
     activeOutput().write(COMPUTER_USE_GUIDANCE, "cua.core");
@@ -349,16 +460,37 @@ export function createCuaApi(native, activeOutput) {
         return images[0] ? { state, screenshot: Buffer.from(images[0].data, "base64") } : { state };
       },
       async click(target, options = {}) {
+        const targetArgs = Array.isArray(target) ? { x: target[0], y: target[1] } : target === undefined || target === null ? {} : { element_index: target };
+        const args = { app, ...targetArgs, ...optionsToClickArgs(options), ...optionsToActionArgs(options) };
+        if (options.menuItem !== undefined) args.menu_item = options.menuItem;
+        if (options.menuPath !== undefined) args.menu_path = options.menuPath;
+        if (options.modifiers !== undefined) args.modifiers = options.modifiers;
+        if (options.hold !== undefined) args.hold = options.hold;
+        return await act("click", args, options);
+      },
+      async menu(path, options = {}) {
+        if (!Array.isArray(path) || !path.length) throw new Error("menu expects an array of menu titles");
+        return await act("click", { app, menu_path: path, ...optionsToActionArgs(options) }, options);
+      },
+      async drag(from, to, options = {}) {
+        const args = { app, from_x: from[0], from_y: from[1], to_x: to[0], to_y: to[1], ...optionsToActionArgs(options) };
+        if (options.dragMethod !== undefined) args.drag_method = options.dragMethod;
+        if (options.modifiers !== undefined) args.modifiers = options.modifiers;
+        return await act("drag", args, options);
+      },
+      async pressKey(key, options = {}) { return await act("press_key", { app, key, ...optionsToKeyArgs(options), ...optionsToActionArgs(options) }, options); },
+      async scroll(target, direction, pages = 1, options = {}) {
         const targetArgs = Array.isArray(target) ? { x: target[0], y: target[1] } : { element_index: target };
-        await call("click", { app, ...targetArgs, ...optionsToClickArgs(options) });
+        return await act("scroll", { app, ...targetArgs, direction, pages, ...optionsToActionArgs(options) }, options);
       },
-      async drag(from, to) { await call("drag", { app, from_x: from[0], from_y: from[1], to_x: to[0], to_y: to[1] }); },
-      async pressKey(key, options = {}) { await call("press_key", { app, key, ...optionsToKeyArgs(options) }); },
-      async scroll(target, direction, pages = 1) {
-        if (Array.isArray(target)) throw new Error("coordinate scroll is not supported by this Open Computer Use runtime");
-        await call("scroll", { app, element_index: target, direction, pages });
+      async setValue(elementIndex, value, options = {}) {
+        const valueArgs = options.secretEnv !== undefined ? { secret_env: options.secretEnv } : { value };
+        return await act("set_value", { app, element_index: elementIndex, ...valueArgs, ...optionsToActionArgs(options) }, options);
       },
-      async setValue(elementIndex, value) { await call("set_value", { app, element_index: elementIndex, value }); },
+      async batch(steps, options = {}) {
+        if (!Array.isArray(steps) || !steps.length) throw new Error("batch expects an array of steps like { tool: \"click\", element_index: \"3\" }");
+        return await act("batch", { app, steps, ...optionsToActionArgs(options) }, options);
+      },
       async selectText(elementIndex, text, options = {}) {
         const index = typeof elementIndex === "string" && /^(0|[1-9]\d*)$/u.test(elementIndex) ? Number(elementIndex) : elementIndex;
         if (!Number.isSafeInteger(index) || index < 0) throw new Error("selectText requires a non-negative integer element index");
@@ -373,11 +505,21 @@ export function createCuaApi(native, activeOutput) {
         if (options.selection !== undefined && !["text", "cursor_before", "cursor_after"].includes(options.selection)) {
           throw new Error("selection must be text, cursor_before or cursor_after");
         }
-        await call("select_text", { app, element_index: elementIndex, text,
-          prefix: options.prefix, suffix: options.suffix, selection: options.selection });
+        return toolResultText(await call("select_text", { app, element_index: elementIndex, text,
+          prefix: options.prefix, suffix: options.suffix, selection: options.selection }));
       },
-      async typeText(text, options = {}) { await call("type_text", { app, text, ...optionsToKeyArgs(options) }); },
-      async performSecondaryAction(elementIndex, action) { await call("perform_secondary_action", { app, element_index: elementIndex, action }); },
+      async typeText(text, options = {}) {
+        const textArgs = options.secretEnv !== undefined ? { secret_env: options.secretEnv } : { text };
+        return await act("type_text", { app, ...textArgs, ...optionsToKeyArgs(options), ...optionsToActionArgs(options) }, options);
+      },
+      async paste(text, options = {}) {
+        const args = { app, text, paste: true, ...optionsToActionArgs(options) };
+        if (options.format !== undefined) args.format = options.format;
+        return await act("type_text", args, options);
+      },
+      async performSecondaryAction(elementIndex, action, options = {}) {
+        return await act("perform_secondary_action", { app, element_index: elementIndex, action, ...optionsToActionArgs(options) }, options);
+      },
     });
   }
   const api = {
@@ -411,6 +553,7 @@ export function createCuaApi(native, activeOutput) {
       }
       return appBinding(app);
     },
+    browser: browserApi,
     async rewriteDocumentation() { activeOutput().write(COMPUTER_USE_GUIDANCE, "cua.core"); },
   };
   return Object.freeze(api);
@@ -642,9 +785,7 @@ function resolveNativeCommand(argv) {
 }
 
 export async function runServer({ command, args }) {
-  // Actions return a short status instead of a settle + full snapshot the adapter would
-  // discard; state is read explicitly by getAXState(). Runtimes without the flag ignore it.
-  const native = new JsonLinePeer({ command, args, env: { ...process.env, OPEN_COMPUTER_USE_ACTION_READ_BACK: "0" } });
+  const native = new JsonLinePeer({ command, args, env: process.env });
   await native.initialize();
   const session = new WorkerJavaScriptSession({ native });
   let buffer = "";

@@ -41,8 +41,10 @@ final class SelectiveObservationTests: XCTestCase {
         for key in ["include_ax", "include_screenshot"] {
             let value = try XCTUnwrap(properties[key] as? [String: Any])
             XCTAssertEqual(value["type"] as? String, "boolean")
-            XCTAssertEqual(value["default"] as? Bool, true)
         }
+        XCTAssertEqual((properties["include_ax"] as? [String: Any])?["default"] as? Bool, true)
+        // Omitted, the screenshot is taken on first contact with a window or for a thin tree.
+        XCTAssertNil((properties["include_screenshot"] as? [String: Any])?["default"])
     }
 
     func testCLIObservationOptionsAndDefaultCompatibility() throws {

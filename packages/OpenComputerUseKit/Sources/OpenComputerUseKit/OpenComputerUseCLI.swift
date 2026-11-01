@@ -120,6 +120,7 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
           snapshot <app>       Print the current accessibility snapshot for an app.
           call <tool>           Call one tool, or run a JSON array of tool calls.
           turn-ended           Notify the running MCP process that the host turn ended.
+          browser-setup [dir]  Register the Chrome extension's native host and copy the extension.
           help [command]       Show general or command-specific help.
           version              Print the CLI version.
 

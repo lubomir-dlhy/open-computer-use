@@ -51,7 +51,7 @@ The visual cursor no longer blocks the action. Moving to the target took about 1
 ## Compatibility
 
 - `OPEN_COMPUTER_USE_ACTION_RESULT=full` restores the previous default for every call (whole tree plus screenshot). `none` returns `ok`.
-- `OPEN_COMPUTER_USE_ACTION_READ_BACK=0` (used by the `js` REPL adapter) still returns `ok` without a read-back.
+- `OPEN_COMPUTER_USE_ACTION_READ_BACK=0` still returns `ok` without a read-back. The `js` REPL adapter no longer sets it: its actions return the diff to the script without showing it.
 - Tool names are unchanged. `batch` is new. Descriptions are shorter and no longer end with "This tool is part of plugin `Computer Use`."
 - Linux and Windows runtimes are unchanged and still return their existing results.
 
@@ -69,3 +69,10 @@ These numbers come from a scripted MCP bench on a release build. It uses the cua
 | `batch` of 3 fixture steps | 3.90 (3 calls) | 0.45 | 2352 (3 calls) | 51 |
 
 `tools/list` plus server instructions went from 3,604 to 3,083 estimated tokens, even with `batch` added and four result options on nine tools.
+
+## Cheaper observation
+
+- `get_app_state` attaches a screenshot only on first contact with a window in a session, or when the window's tree has fewer than 12 elements (too thin to act on). Otherwise it notes that the screenshot was skipped and keeps coordinate input working from the last capture of the same window at the same size. `include_screenshot: true` always captures, `false` never does; `OPEN_COMPUTER_USE_STATE_SCREENSHOT=always` restores the old default.
+- `scroll` takes `x`/`y` in the last screenshot instead of `element_index`.
+- `click` and `press_key` take `hold`: seconds the button or key stays down before release (up to 10).
+- `type_text` with `paste: true` pastes through the app's own Paste (`format`: `text`, `html` or `markdown`, the last two as rich text) and puts the user's clipboard back afterwards. `secret_env` cannot be pasted.

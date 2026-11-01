@@ -40,6 +40,8 @@ private func normalizedElementIndexNumber(_ value: Double) -> String? {
 public final class ComputerUseToolDispatcher {
     private let service: ComputerUseService
 
+    private lazy var browser = BrowserTool()
+
     public init(service: ComputerUseService = ComputerUseService()) {
         self.service = service
     }
@@ -195,6 +197,8 @@ public final class ComputerUseToolDispatcher {
         switch name {
         case "list_apps":
             return service.listApps()
+        case "browser":
+            return try browser.call(arguments)
         case "query":
             let matches = try service.query(
                 app: requireString("app", in: arguments),
@@ -219,7 +223,9 @@ public final class ComputerUseToolDispatcher {
                     includeAX: try strictObservationBool("include_ax", in: arguments),
                     includeScreenshot: try strictObservationBool("include_screenshot", in: arguments)
                 ),
-                windowID: try validatedQueryWindowID(arguments["window_id"])
+                windowID: try validatedQueryWindowID(arguments["window_id"]),
+                autoScreenshot: arguments["include_screenshot"] == nil
+                    && RequestEnvironment.current["OPEN_COMPUTER_USE_STATE_SCREENSHOT"] != "always"
             )
         case "click" where arguments["menu_item"] != nil:
             guard let item = arguments["menu_item"] as? String, let elementIndex = optionalElementIndex(in: arguments) else {
@@ -231,6 +237,13 @@ public final class ComputerUseToolDispatcher {
                 throw ComputerUseError.invalidArguments("menu_path must be an array of menu titles, used without element_index or x/y")
             }
             return try service.pressMenuItem(app: requireString("app", in: arguments), path: path)
+        case "click" where arguments["hold"] != nil, "press_key" where arguments["hold"] != nil:
+            guard let hold = optionalDouble("hold", in: arguments), hold > 0, hold <= 10 else {
+                throw ComputerUseError.invalidArguments("hold must be seconds from 0 to 10")
+            }
+            var released = arguments
+            released["hold"] = nil
+            return try InputHold.with(hold) { try callSingleTool(name: name, arguments: released) }
         case "click":
             return try service.click(
                 app: requireString("app", in: arguments),
@@ -247,6 +260,14 @@ public final class ComputerUseToolDispatcher {
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
                 action: requireString("action", in: arguments)
+            )
+        case "scroll" where arguments["element_index"] == nil && arguments["x"] != nil:
+            return try service.scroll(
+                app: requireString("app", in: arguments),
+                direction: requireString("direction", in: arguments),
+                x: requireDouble("x", in: arguments),
+                y: requireDouble("y", in: arguments),
+                pages: optionalDouble("pages", in: arguments) ?? 1
             )
         case "scroll":
             return try service.scroll(
@@ -265,6 +286,16 @@ public final class ComputerUseToolDispatcher {
                 dragMethod: try parseDragMethod(optionalString("drag_method", in: arguments)),
                 via: try optionalPointArray("path", in: arguments),
                 modifiers: try parseMouseModifiers(optionalStringArray("modifiers", in: arguments))
+            )
+        case "type_text" where arguments["paste"] as? Bool == true:
+            guard arguments[SecretInput.argumentKey] == nil else {
+                throw ComputerUseError.invalidArguments("secret_env cannot be pasted: a clipboard manager could keep it. Type it instead.")
+            }
+            return try service.paste(
+                app: requireString("app", in: arguments),
+                text: try requireString("text", in: arguments),
+                format: optionalString("format", in: arguments) ?? "text",
+                keyMethod: try parseKeyMethod(optionalString("key_method", in: arguments))
             )
         case "type_text":
             return try service.typeText(
