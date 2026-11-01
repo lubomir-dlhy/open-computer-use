@@ -146,7 +146,10 @@ public final class ComputerUseToolDispatcher {
             observation.state = .none
             observation.screenshot = false
             let arguments = step
-            return (tool: tool, observation: observation, run: { try self.callSingleTool(name: tool, arguments: arguments) })
+            let key = (step["key"] as? String)?.lowercased().replacingOccurrences(of: " ", with: "") ?? ""
+            let copies = tool == "press_key" && ["+c", "+x"].contains(where: key.hasSuffix) && ["super", "cmd", "command"].contains(where: key.contains)
+            return (tool: tool, observation: observation, copiesToClipboard: copies,
+                    run: { try self.callSingleTool(name: tool, arguments: arguments) })
         }
         return try service.withActionObservation(try actionObservation(in: arguments)) {
             try service.runBatch(app: app, steps: steps)

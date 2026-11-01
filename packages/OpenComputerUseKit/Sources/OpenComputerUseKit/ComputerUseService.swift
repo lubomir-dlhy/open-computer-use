@@ -59,6 +59,8 @@ func validateClickMethod(
 public enum KeyMethod: String, CaseIterable, Sendable {
     case auto
     case skyKey = "sky_key"
+    /// Posted to the process without touching focus, so transient popovers stay open.
+    case appPost = "app_post"
 }
 
 func keyActionSnapshotRecoveryPolicy(for method: KeyMethod) -> SnapshotRecoveryPolicy {
@@ -826,7 +828,7 @@ public final class ComputerUseService {
     /// Indices in every step refer to that state. Stops at the first failing step.
     public func runBatch(
         app query: String,
-        steps: [(tool: String, observation: ActionObservation, run: () throws -> ToolCallResult)]
+        steps: [(tool: String, observation: ActionObservation, copiesToClipboard: Bool, run: () throws -> ToolCallResult)]
     ) throws -> ToolCallResult {
         let baseline = snapshotsByApp[query.lowercased()]
         var failure: String?
@@ -854,11 +856,15 @@ public final class ComputerUseService {
             completed += 1
         }
         }
+        // A copy-and-paste inside a batch (Finder's Move Item Here) must not leave the
+        // user's clipboard replaced.
+        let savedClipboard = steps.contains(where: { $0.copiesToClipboard }) ? ClipboardSnapshot() : nil
         if holdsFocus, let app, let windowID {
             SkyLightSPI.shared.withHeldSyntheticFocus(pid: app.pid, windowID: windowID, runSteps)
         } else {
             runSteps()
         }
+        savedClipboard?.restore()
 
         var header = failure.map { ["Ran \(completed) of \(steps.count) steps; \($0)"] } ?? ["Ran \(steps.count) steps."]
         header += notes
@@ -967,6 +973,14 @@ public final class ComputerUseService {
            try performAction(named: "AXOpen", on: element, availableActions: record.rawActions) {
             return
         }
+        // A popover closes on the first click, so the second would land on whatever
+        // is underneath (in Finder, opening a file). Press the element instead.
+        if let element = record.element, hasAncestorRole("AXPopover", of: element) {
+            if try performPreferredClick(on: record, button: .left, clickCount: 1) {
+                return
+            }
+            throw ComputerUseError.message("element_index=\(elementIndex) is in a popover; click it once instead of double-clicking")
+        }
         // SkyLight gives the target synthetic focus, so a background window takes the
         // clicks instead of treating the first one as an activation click.
         try performExplicitMouseClick(
@@ -984,12 +998,36 @@ public final class ComputerUseService {
     /// Opens an element's context menu and picks an item in one call, so the menu,
     /// which captures the keyboard while open, is up only for a moment.
     public func chooseContextMenuItem(app query: String, elementIndex: String, item: String) throws -> ToolCallResult {
+        // Menu commands act on the key window's selection (Finder tags, Compress);
+        // a background app has no key window unless one is synthesized.
         let snapshot = try snapshotForAction(app: query, elementIndex: elementIndex)
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != snapshot.app.pid, let windowID = snapshot.targetWindowID {
+            return try SkyLightSPI.shared.withHeldSyntheticFocus(pid: snapshot.app.pid, windowID: windowID) {
+                try chooseMenuItem(query: query, snapshot: snapshot, elementIndex: elementIndex, item: item)
+            }
+        }
+        return try chooseMenuItem(query: query, snapshot: snapshot, elementIndex: elementIndex, item: item)
+    }
+
+    private func chooseMenuItem(query: String, snapshot: AppSnapshot, elementIndex: String, item: String) throws -> ToolCallResult {
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
         guard let element = record.element else {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
         }
-        guard try performAction(named: kAXShowMenuAction as String, on: element, availableActions: copyActions(for: element) ?? record.rawActions) else {
+        // A menu button (Finder's toolbar Action menu) opens its own menu when pressed;
+        // its items work where the same items in a right-click menu do not.
+        let actions = copyActions(for: element) ?? record.rawActions
+        let isMenuButton = [kAXMenuButtonRole as String, kAXPopUpButtonRole as String].contains(stringValue(of: element, attribute: kAXRoleAttribute) ?? "")
+        let opened: Bool
+        if isMenuButton, actions.contains(kAXPressAction as String) {
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            AXUIElementSetMessagingTimeout(element, 0)
+            opened = result == .success || result == .cannotComplete
+        } else {
+            opened = try performAction(named: kAXShowMenuAction as String, on: element, availableActions: actions)
+        }
+        guard opened else {
             throw ComputerUseError.message("element \(elementIndex) has no context menu (no AXShowMenu action)")
         }
         let deadline = Date().addingTimeInterval(1)
@@ -1001,6 +1039,8 @@ public final class ComputerUseService {
         guard let menu else {
             throw ComputerUseError.message("element \(elementIndex)'s context menu did not appear in the accessibility tree")
         }
+        // Let the menu finish validating its items before one is pressed.
+        Thread.sleep(forTimeInterval: 0.15)
         let items = copyChildren(of: menu)
         let titles = items.map { stringValue(of: $0, attribute: kAXTitleAttribute) ?? "" }
         guard let target = MenuPath.match(item, in: titles).map({ items[$0] }) ?? MenuPath.pressableDescendant(matching: item, in: items) else {
@@ -1916,7 +1956,8 @@ public final class ComputerUseService {
                 return true
             }
 
-            if try performAction(named: "AXOpen", on: element, availableActions: record.rawActions, repeatCount: clickCount) {
+            // Opening is a double-click; a single click must never open a file.
+            if clickCount >= 2, try performAction(named: "AXOpen", on: element, availableActions: record.rawActions) {
                 return true
             }
         case .right:

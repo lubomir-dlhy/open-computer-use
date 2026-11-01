@@ -73,9 +73,18 @@ Work without bringing apps forward or touching the user's windows:
   background double-click. To edit in place (e.g. a TodoMVC item), put the double-click, `press_key` `super+a`,
   `type_text` and `press_key` `Return` in one `batch`: between separate calls the editor loses focus and closes.
 - **Lists and Finder:** clicking a row selects it; add `"modifiers": ["cmd"]` to add a row to the selection.
-  With files selected, `menu_item` on a selected file's name field reaches Finder's context menu, e.g.
-  `"Compress"`; Finder's menu bar commands are disabled while it is in the background. Moving files and
-  committing a rename are not available in the background.
+  Single clicks never open files; a double-click does. Finder works in the background when each operation is
+  one `batch` (it keeps Finder's window focused for the whole sequence):
+  - Rename: `[{"tool":"click","element_index":ROW,"click_method":"sky_click"}, {"tool":"press_key","key":"Return"},
+    {"tool":"press_key","key":"super+a"}, {"tool":"type_text","text":"new-name.txt"}, {"tool":"press_key","key":"Return"}]`
+  - Move into a folder shown in the same window: `[click FILE_ROW (sky_click), press super+c,
+    click FOLDER_ROW (sky_click), press super+Down, press super+alt+v, press super+Up]`. The user's clipboard
+    is restored afterwards.
+  - Expand a folder row in list view: `[click ROW (sky_click), press Right]`.
+  - Compress the selection: `click` a selected file's name field with `"menu_item": "Compress"`.
+  Finder tags cannot be applied in the background yet.
+- **Popovers:** keys sent with the default method can close a transient popover; use `"key_method": "app_post"`
+  for keys meant for a popover's field.
 - **Keys:** `press_key` delivers through SkyLight while the app is in the background, so shortcuts and `Return`
   reach Chromium and AppKit menus. Do not force `click_method: "app_post"`/`"sky_click"` on elements that have an
   index; the default tries accessibility first.

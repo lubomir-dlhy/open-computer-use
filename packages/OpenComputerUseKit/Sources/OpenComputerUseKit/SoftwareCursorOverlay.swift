@@ -70,6 +70,29 @@ func visualCursorBlocksActions(environment: [String: String]) -> Bool {
     return ["1", "true", "yes", "on"].contains(value)
 }
 
+/// `windows` is front to back, as CGWindowList returns it. Windows of the frontmost
+/// app at or below the target that overlap it would end up under the cursor panel.
+func cursorPanelWouldCoverFrontmostApp(
+    targetWindowID: CGWindowID,
+    frontmostPID: pid_t?,
+    ownPID: pid_t,
+    windows: [[String: Any]]
+) -> Bool {
+    guard let frontmostPID, frontmostPID != ownPID,
+          let targetIndex = windows.firstIndex(where: { ($0[kCGWindowNumber as String] as? Int).map(CGWindowID.init) == targetWindowID }),
+          let targetBounds = (windows[targetIndex][kCGWindowBounds as String] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) })
+    else {
+        return false
+    }
+    return windows[targetIndex...].contains { window in
+        guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == frontmostPID,
+              (window[kCGWindowLayer as String] as? Int) == 0,
+              let bounds = (window[kCGWindowBounds as String] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) })
+        else { return false }
+        return bounds.intersects(targetBounds)
+    }
+}
+
 func visualCursorEnabled(environment: [String: String]) -> Bool {
     guard let rawValue = environment["OPEN_COMPUTER_USE_VISUAL_CURSOR"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
         return true
@@ -465,6 +488,13 @@ enum SoftwareCursorOverlay {
             return
         }
 
+        // Over the user's own app the cursor would cover their window; stay hidden.
+        if let effectiveTargetWindow, wouldCoverFrontmostApp(targetWindowID: effectiveTargetWindow.windowID) {
+            panel.orderOut(nil)
+            activeTargetWindow = effectiveTargetWindow
+            return
+        }
+
         let desiredLevel = NSWindow.Level(rawValue: effectiveTargetWindow?.layer ?? 0)
         if panel.level != desiredLevel {
             panel.level = desiredLevel
@@ -691,6 +721,26 @@ enum SoftwareCursorOverlay {
 
         panel?.orderOut(nil)
         self.activeTargetWindow = nil
+    }
+
+    private static var coverCheck: (windowID: CGWindowID, time: CFTimeInterval, covers: Bool)?
+
+    /// The panel sits directly above the target window, so it lands above every
+    /// window stacked below the target. It must not land above a window of the
+    /// app the user is in. Cached briefly: ordering runs on every animation frame.
+    private static func wouldCoverFrontmostApp(targetWindowID: CGWindowID) -> Bool {
+        let now = CACurrentMediaTime()
+        if let cached = coverCheck, cached.windowID == targetWindowID, now - cached.time < 0.25 {
+            return cached.covers
+        }
+        let covers = cursorPanelWouldCoverFrontmostApp(
+            targetWindowID: targetWindowID,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            ownPID: ProcessInfo.processInfo.processIdentifier,
+            windows: CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        )
+        coverCheck = (targetWindowID, now, covers)
+        return covers
     }
 
     private static func isWindowOnScreen(_ windowID: CGWindowID) -> Bool {
