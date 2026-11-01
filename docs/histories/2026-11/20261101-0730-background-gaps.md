@@ -49,3 +49,12 @@ Every fix keeps the target app inactive. Where macOS or the app forces the foreg
 - `AgentWindows` records the windows of the target app that appear during each action or `get_app_state` (including apps OCU launched). At turn end, and at session end (which also covers a crashed agent), they are closed with their close buttons in the background, and launched apps left without windows are quit.
 - A save-changes sheet is cancelled and its window left open, so no work is discarded. `get_app_state keep_window: true` keeps the agent's window for tasks that must leave it open.
 - Live check: the window was closed at turn end, kept with keep_window, and closed after a killed client. A launched Calculator was quit. Closing caused no focus changes.
+
+## [2026-11-01 15:00] | Task: Cursor overlay and Finder in the background (1.1.3-sky.11)
+
+### 🛠 Changes Overview
+- The software cursor stays hidden whenever a window of the frontmost app is at or below the target window and overlaps it. It was being counted as covering the user's window when the user and the agent were both in Chrome.
+- `batch` keeps the target window synthetically key for the whole sequence. Finder rename (Return, Cmd+A, type, Return) and move (Cmd+C, open folder, Cmd+Option+V) now work in the background, and menu bar commands such as File > Compress are enabled there without showing a menu. A copy inside a batch restores the user's clipboard.
+- Single clicks never use AXOpen. Double-clicks inside popovers press the element instead of opening the file below (this is what launched Preview).
+- `menu_item` opens menu buttons by pressing them; `menu_path` reaches controls inside menu items. New `key_method: app_post` for keys meant for popovers.
+- Not solved: Finder tags. Every route (context menu, Action menu, File menu colour buttons, toolbar popover, preview-pane token field) updates the UI but does not write the tag while Finder is in the background.
