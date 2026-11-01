@@ -664,8 +664,16 @@ public final class ComputerUseService {
         let previous = baseline ?? stored
         // Only a full result renumbers; otherwise indices the agent holds stay valid.
         let seed = options.state == .full ? nil : stored.flatMap { $0.mode == .accessibility ? StableIndexSeed(previous: $0) : nil }
-        let (settled, waitMet) = try settledSnapshot(for: query, previous: previous, recoveryPolicy: recoveryPolicy,
-                                                      seed: seed, options: options)
+        let settledRead: (AppSnapshot, waitMet: Bool?)
+        do {
+            settledRead = try settledSnapshot(for: query, previous: previous, recoveryPolicy: recoveryPolicy,
+                                              seed: seed, options: options)
+        } catch ComputerUseError.appNotFound {
+            return .text("ok; the app is no longer running.")
+        } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
+            return .text("ok; the app has no window now.")
+        }
+        let (settled, waitMet) = settledRead
         var snapshot = settled
         // Fixture coordinates resolve by identifier, so they never need a screenshot.
         snapshot.observation.includeScreenshot = snapshot.mode == .fixture
@@ -715,12 +723,14 @@ public final class ComputerUseService {
         options: ActionObservation
     ) throws -> (AppSnapshot, waitMet: Bool?) {
         let pollInterval: TimeInterval = 0.03
-        let unchangedWindow: TimeInterval = 0.15
+        let unchangedWindow: TimeInterval = 0.25
         let maxSettle: TimeInterval = 1.2
         // Large trees cost more per read than a second confirmation is worth.
         let confirmReadBudget: TimeInterval = 0.12
         let condition = WaitCondition(options.waitFor)
-        let app = try AppDiscovery.resolve(query)
+        // Never relaunch here: an action that made the app quit must not reopen it.
+        let app = try AppDiscovery.resolveRunning(query)
+        let pin = windowPin(for: query)
         let start = TimingLog.now()
         var last: AppSnapshot?
 
@@ -732,7 +742,8 @@ public final class ComputerUseService {
                 treeLimits: previous?.treeLimits ?? .defaults,
                 recoveryPolicy: recoveryPolicy,
                 observation: SnapshotObservationOptions(includeAX: true, includeScreenshot: false),
-                stableIndices: seed
+                stableIndices: seed,
+                windowPin: pin
             )
             let now = TimingLog.now()
             let elapsed = now - start
@@ -846,20 +857,21 @@ public final class ComputerUseService {
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
         windowPlacement: WindowPlacement = .keep,
-        observation: SnapshotObservationOptions = .defaults
+        observation: SnapshotObservationOptions = .defaults,
+        windowID: CGWindowID? = nil
     ) throws -> ToolCallResult {
         try observation.validate()
         guard windowPlacement != .keep else {
             return snapshotResult(
-                for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation),
+                for: try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .allowActivation, observation: observation, windowID: windowID),
                 style: .fullState
             )
         }
 
         // Explicit placements never activate or raise; they only move the frame.
         let snapshot = windowPlacement == .agentDisplay
-            ? try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
-            : try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
+            ? try snapshotParkingMinimizedWindow(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation, windowID: windowID)
+            : try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation, windowID: windowID)
         guard snapshot.mode != .fixture else {
             throw ComputerUseError.message("window_placement '\(windowPlacement.rawValue)' is not supported for fixture apps")
         }
@@ -881,6 +893,24 @@ public final class ComputerUseService {
         }
 
         return snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation), style: .fullState)
+    }
+
+    /// Presses a menu bar item by its titles, without opening the menu on screen.
+    public func pressMenuItem(app query: String, path: [String]) throws -> ToolCallResult {
+        try requireUsableComputerUseSession()
+        let app = try AppDiscovery.resolveRunning(query)
+        let item = try MenuPath.resolve(path, appElement: AXUIElementCreateApplication(app.pid))
+        // A menu command that opens a modal panel can hold the reply; the press is already delivered.
+        AXUIElementSetMessagingTimeout(item, 2)
+        let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
+        guard result == .success || result == .cannotComplete else {
+            throw ComputerUseError.message("Pressing menu item \(path.joined(separator: " > ")) failed with \(result.rawValue)")
+        }
+        do {
+            return try actionResult(for: query, recoveryPolicy: .readOnly)
+        } catch ComputerUseError.stateUnavailable {
+            return .text("Pressed \(path.joined(separator: " > ")); the app has no window to read back.")
+        }
     }
 
     public func click(
@@ -1242,8 +1272,21 @@ public final class ComputerUseService {
             return try actionResult(for: query, recoveryPolicy: keyActionSnapshotRecoveryPolicy(for: keyMethod))
         }
 
+        // Background Chromium windows and AppKit menu shortcuts ignore keys posted
+        // to the process; SkyLight delivery reaches them without activating the app.
+        if prefersSkyKeys(for: snapshot), let target = try? skyKeyTarget(for: snapshot),
+           (try? InputSimulation.pressKeyWithSkyLight(key, windowID: target.windowID, pid: target.pid)) != nil {
+            return try actionResult(for: query, recoveryPolicy: .readOnly)
+        }
+
         try InputSimulation.pressKey(key, pid: snapshot.app.pid)
         return try actionResult(for: query)
+    }
+
+    private func prefersSkyKeys(for snapshot: AppSnapshot) -> Bool {
+        snapshot.mode == .accessibility
+            && SkyLightSPI.shared.capability.isAvailable
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier != snapshot.app.pid
     }
 
     private func requireAutoKeyMethodForFixture(_ keyMethod: KeyMethod) throws {
@@ -1505,7 +1548,8 @@ public final class ComputerUseService {
         textLimit: SnapshotTextLimit,
         treeLimits: AccessibilityTreeLimits,
         recoveryPolicy: SnapshotRecoveryPolicy,
-        observation: SnapshotObservationOptions
+        observation: SnapshotObservationOptions,
+        windowID: CGWindowID? = nil
     ) throws -> AppSnapshot {
         // A hidden app's tree is readable, but its screenshot is blank and
         // coordinate clicks never reach it.
@@ -1514,11 +1558,14 @@ public final class ComputerUseService {
             _ = try AgentDisplay.shared.parkHiddenApp(pid: app.pid)
         }
         do {
-            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: recoveryPolicy, observation: observation)
+            return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: recoveryPolicy, observation: observation, windowID: windowID)
         } catch ComputerUseError.stateUnavailable(let message) where message.hasPrefix(computerUseNoWindowFoundMessage) {
-            guard !foregroundActivationEnabled(),
-                  AgentDisplay.shared.isSupported,
-                  try AgentDisplay.shared.parkMinimizedWindow(pid: AppDiscovery.resolve(query).pid) else {
+            guard !foregroundActivationEnabled(), AgentDisplay.shared.isSupported else {
+                throw ComputerUseError.stateUnavailable(message)
+            }
+            let app = try AppDiscovery.resolve(query)
+            guard try AgentDisplay.shared.parkMinimizedWindow(pid: app.pid)
+                    || AgentDisplay.shared.openWindowInBackground(app: app) else {
                 throw ComputerUseError.stateUnavailable(message)
             }
             return try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits, recoveryPolicy: .readOnly, observation: observation)
@@ -1530,19 +1577,30 @@ public final class ComputerUseService {
         textLimit: SnapshotTextLimit = .defaults,
         treeLimits: AccessibilityTreeLimits = .defaults,
         recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
-        observation: SnapshotObservationOptions = .defaults
+        observation: SnapshotObservationOptions = .defaults,
+        windowID: CGWindowID? = nil
     ) throws -> AppSnapshot {
         let app = try AppDiscovery.resolve(query)
+        let pin = windowID.map { WindowPin(windowID: $0, knownWindowIDs: [], explicit: true) } ?? windowPin(for: query)
         let snapshot = try SnapshotBuilder.build(
             for: app,
             textLimit: textLimit,
             treeLimits: treeLimits,
             recoveryPolicy: recoveryPolicy,
-            observation: observation
+            observation: observation,
+            windowPin: pin
         )
+        if let windowID, snapshot.targetWindowID != windowID {
+            let available = snapshot.windows.map { "\($0.windowID) \(quoted($0.title))" }.joined(separator: ", ")
+            throw ComputerUseError.invalidArguments("window_id \(windowID) is not a window of \(snapshot.app.name). Windows: \(available)")
+        }
 
         rememberSnapshot(snapshot, for: query)
         return snapshot
+    }
+
+    private func windowPin(for query: String) -> WindowPin? {
+        snapshotsByApp[query.lowercased()].flatMap(WindowPin.init(snapshot:))
     }
 
     func rememberSnapshot(_ snapshot: AppSnapshot, for query: String) {
@@ -1790,11 +1848,24 @@ public final class ComputerUseService {
             return false
         }
 
+        // Showing a menu runs the app's menu tracking loop, which holds the AX
+        // reply until the menu closes; the menu is open once the request is in.
+        let showsMenu = action == kAXShowMenuAction as String
+        if showsMenu {
+            AXUIElementSetMessagingTimeout(element, 0.5)
+        }
+        defer {
+            if showsMenu {
+                AXUIElementSetMessagingTimeout(element, 0)
+            }
+        }
         let attempts = max(repeatCount, 1)
         for index in 0..<attempts {
             try requireUsableComputerUseSession()
             let result = AXUIElementPerformAction(element, action as CFString)
             switch result {
+            case .cannotComplete where showsMenu:
+                return true
             case .success:
                 if index < attempts - 1 {
                     Thread.sleep(forTimeInterval: 0.05)

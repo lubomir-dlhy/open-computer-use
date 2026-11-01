@@ -341,6 +341,30 @@ final class AgentDisplay: @unchecked Sendable {
         return false
     }
 
+    /// Asks a running app without windows to show one (the Dock-click "reopen"
+    /// event, sent without activation) and parks the window that appears, so it
+    /// never lands over the user's work.
+    func openWindowInBackground(app: RunningAppDescriptor, timeout: TimeInterval = 4) throws -> Bool {
+        guard let url = app.runningApplication.bundleURL else {
+            return false
+        }
+        try AppDiscovery.openInBackground(appURL: url)
+        let appElement = AXUIElementCreateApplication(app.pid)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+               let window = (value as? [AXUIElement])?.first,
+               let windowID = SkyLightSPI.shared.windowID(for: window) {
+                // Unparked, the window still works in the background; it may just be visible.
+                _ = try? park(windowID: windowID, pid: app.pid, window: window)
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
+    }
+
     /// Restore every parked window, or only those `owner` parked.
     func restoreAll(owner: Int? = nil) {
         lock.lock()

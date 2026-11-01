@@ -155,8 +155,14 @@ public final class ComputerUseToolDispatcher {
                 observation: SnapshotObservationOptions(
                     includeAX: try strictObservationBool("include_ax", in: arguments),
                     includeScreenshot: try strictObservationBool("include_screenshot", in: arguments)
-                )
+                ),
+                windowID: try validatedQueryWindowID(arguments["window_id"])
             )
+        case "click" where arguments["menu_path"] != nil:
+            guard let path = arguments["menu_path"] as? [String], arguments["element_index"] == nil, arguments["x"] == nil else {
+                throw ComputerUseError.invalidArguments("menu_path must be an array of menu titles, used without element_index or x/y")
+            }
+            return try service.pressMenuItem(app: requireString("app", in: arguments), path: path)
         case "click":
             return try service.click(
                 app: requireString("app", in: arguments),

@@ -371,9 +371,14 @@ enum AppDiscovery {
         return nil
     }
 
-    private static func openApplication(at appURL: URL) throws {
+    /// Launches the app, or sends a running one the reopen event, without activating it.
+    static func openInBackground(appURL: URL) throws {
+        try openApplication(at: appURL, activates: false)
+    }
+
+    private static func openApplication(at appURL: URL, activates: Bool = foregroundActivationEnabled()) throws {
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = foregroundActivationEnabled()
+        configuration.activates = activates
         let semaphore = DispatchSemaphore(value: 0)
         let errorBox = LaunchErrorBox()
 

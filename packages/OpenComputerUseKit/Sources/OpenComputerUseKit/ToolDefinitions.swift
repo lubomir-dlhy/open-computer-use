@@ -32,7 +32,7 @@ public enum ToolDefinitions {
     public static let all: [ToolDefinition] = [
         ToolDefinition(
             name: "click",
-            description: "Click an element by index, or at x/y pixel coordinates in the last screenshot.",
+            description: "Click an element by index, at x/y pixel coordinates in the last screenshot, or a menu bar item by menu_path.",
             annotations: defaultAnnotations(),
             inputSchema: actionSchema(
                 properties: [
@@ -47,6 +47,11 @@ public enum ToolDefinitions {
                         enumValues: ClickMethod.allCases.map(\.rawValue)
                     ),
                     "modifiers": stringArrayProperty(description: "Held during the click (sky_click only)", enumValues: modifierNames),
+                    "menu_path": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "description": "Menu bar titles to press without opening the menu, e.g. [\"File\", \"New window\"] or [\"Apple\", \"About This Mac\"]. Case-insensitive; a unique prefix is enough.",
+                    ],
                 ],
                 required: ["app"]
             )
@@ -101,6 +106,7 @@ public enum ToolDefinitions {
                     "text_limit": textLimitProperty(description: "Max text chars, or \"max\". Default 500"),
                     "max_tree_nodes": positiveIntegerProperty(description: "Default 1200"),
                     "max_tree_depth": positiveIntegerProperty(description: "Default 64"),
+                    "window_id": positiveIntegerProperty(description: "Read this window (ids are listed under Other windows); later actions stay on it"),
                     "window_placement": stringProperty(
                         description: "keep (default); agent_display parks the window on the agent's invisible display so a covered or other-Space window renders and takes input without touching the user's Space, focus or pointer (it leaves the user's desktop until restore or exit); restore puts it back.",
                         enumValues: WindowPlacement.allCases.map(\.rawValue)
@@ -283,7 +289,7 @@ private func readOnlyAnnotations() -> [String: Any] {
 
 private func keyMethodProperty() -> [String: Any] {
     stringProperty(
-        description: "auto (default), or sky_key: authenticated SkyLight key events to the current on-screen target window without changing focus. Try sky_key when auto has no effect, e.g. menu shortcuts like super+s.",
+        description: "auto (default; press_key uses sky_key while the app is in the background), or sky_key: authenticated SkyLight key events to the current target window without changing focus. Try sky_key when auto has no effect.",
         enumValues: KeyMethod.allCases.map(\.rawValue)
     )
 }

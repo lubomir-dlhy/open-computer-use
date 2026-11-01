@@ -156,6 +156,8 @@ public struct AppSnapshot {
     var carriedScreenshotPixelSize: CGSize? = nil
     /// Lowest index never issued for this window, so a removed index is not reused.
     var nextFreshIndex: Int? = nil
+    /// The app's windows when the snapshot was taken, for pinning and for listing.
+    var windows: [(windowID: CGWindowID, title: String)] = []
     /// Limits the tree was read with; an action's read-back reuses them.
     var textLimit: SnapshotTextLimit = .defaults
     var treeLimits: AccessibilityTreeLimits = .defaults
@@ -179,6 +181,11 @@ public struct AppSnapshot {
 
         lines.append("App=\(appReference) (pid \(app.pid))")
         lines.append("Window: \(quoted(displayTitle)), App: \(app.name).")
+        let others = windows.filter { $0.windowID != targetWindowID }
+        if style == .fullState, !others.isEmpty {
+            let listed = others.prefix(8).map { "\($0.windowID) \(quoted(String($0.title.prefix(50))))" }
+            lines.append("Other windows (get_app_state window_id): " + listed.joined(separator: ", ") + (others.count > 8 ? ", …" : ""))
+        }
         lines.append(contentsOf: treeLines)
         if !observation.includeAX {
             lines.append(SnapshotObservationOptions.accessibilityOmittedNote)
@@ -220,6 +227,32 @@ struct StableIndexSeed {
     }
 }
 
+/// Keeps reads on the window the agent works in. The app's focused window wins
+/// only when it is new since the pin was taken, e.g. one the agent just opened,
+/// so the user switching between their own windows does not move the agent.
+struct WindowPin {
+    let windowID: CGWindowID
+    let knownWindowIDs: Set<CGWindowID>
+    /// Chosen by the agent for this read: the focused window never wins.
+    let explicit: Bool
+
+    init(windowID: CGWindowID, knownWindowIDs: Set<CGWindowID>, explicit: Bool = false) {
+        self.windowID = windowID
+        self.knownWindowIDs = knownWindowIDs
+        self.explicit = explicit
+    }
+
+    init?(snapshot: AppSnapshot) {
+        guard snapshot.mode == .accessibility, let windowID = snapshot.targetWindowID else { return nil }
+        self.init(windowID: windowID, knownWindowIDs: Set(snapshot.windows.map(\.windowID)))
+    }
+
+    func followsFocus(to focusedWindowID: CGWindowID?) -> Bool {
+        guard !explicit, let focusedWindowID else { return false }
+        return !knownWindowIDs.contains(focusedWindowID)
+    }
+}
+
 /// Query indexes start at 1,000,000; tree indexes stay below.
 let stableIndexLimit = 1_000_000
 
@@ -235,7 +268,8 @@ enum SnapshotBuilder {
         treeLimits: AccessibilityTreeLimits = .defaults,
         recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation,
         observation: SnapshotObservationOptions = .defaults,
-        stableIndices: StableIndexSeed? = nil
+        stableIndices: StableIndexSeed? = nil,
+        windowPin: WindowPin? = nil
     ) throws -> AppSnapshot {
         try observation.validate()
         if app.name == FixtureBridge.appName, let fixtureState = try FixtureBridge.readState() {
@@ -243,7 +277,7 @@ enum SnapshotBuilder {
         }
         var snapshot = try buildLiveSnapshot(for: app, textLimit: textLimit, treeLimits: treeLimits,
                                              recoveryPolicy: recoveryPolicy, observation: observation,
-                                             stableIndices: stableIndices)
+                                             stableIndices: stableIndices, windowPin: windowPin)
         snapshot.textLimit = textLimit
         snapshot.treeLimits = treeLimits
         return snapshot
@@ -261,7 +295,8 @@ enum SnapshotBuilder {
         treeLimits: AccessibilityTreeLimits,
         recoveryPolicy: SnapshotRecoveryPolicy,
         observation: SnapshotObservationOptions,
-        stableIndices: StableIndexSeed?
+        stableIndices: StableIndexSeed?,
+        windowPin: WindowPin?
     ) throws -> AppSnapshot {
 
         try requireUsableComputerUseSession()
@@ -283,6 +318,13 @@ enum SnapshotBuilder {
            recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: nil) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
+        }
+        let windows = appWindows(appElement: appElement)
+        if let windowPin, let pinned = windows.first(where: { $0.windowID == windowPin.windowID })?.element {
+            let focusedID = focusedWindow.flatMap { SkyLightSPI.shared.windowID(for: $0) }
+            if focusedID != windowPin.windowID, windowPin.followsFocus(to: focusedID) == false {
+                focusedWindow = pinned
+            }
         }
 
         var rootWindow: AXUIElement
@@ -316,7 +358,7 @@ enum SnapshotBuilder {
             throw ComputerUseError.stateUnavailable(backgroundNoWindowMessage)
         }
 
-        return buildAccessibilitySnapshot(
+        var snapshot = buildAccessibilitySnapshot(
             app: app,
             appElement: appElement,
             rootElement: rootWindow,
@@ -330,6 +372,16 @@ enum SnapshotBuilder {
             observation: observation,
             stableIndices: stableIndices
         )
+        snapshot.windows = windows.map { (windowID: $0.windowID, title: stringValue(of: $0.element, attribute: kAXTitleAttribute) ?? "") }
+        return snapshot
+    }
+
+    /// The app's AX windows that have a CGWindowID, in AX order.
+    private static func appWindows(appElement: AXUIElement) -> [(windowID: CGWindowID, element: AXUIElement)] {
+        (copyArray(appElement, attribute: kAXWindowsAttribute) ?? []).compactMap { element in
+            guard isUsableWindowElement(element), let windowID = SkyLightSPI.shared.windowID(for: element) else { return nil }
+            return (windowID, element)
+        }
     }
 
     private static func buildAccessibilitySnapshot(
@@ -1168,6 +1220,12 @@ private struct TreeRenderer {
         }
 
         if hidesChildren {
+            // An open context menu hangs off the element it was shown for. Menu bar
+            // items always carry their (closed) menus, so they are left out.
+            for child in childElements where role != kAXMenuBarItemRole as String
+                && stringValue(of: child, attribute: kAXRoleAttribute) == kAXMenuRole as String {
+                render(child, depth: depth + 1, ancestors: nextAncestors)
+            }
             return
         }
 
