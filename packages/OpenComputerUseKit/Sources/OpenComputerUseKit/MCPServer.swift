@@ -136,6 +136,7 @@ public final class StdioMCPServer {
 
     private func endTurn() {
         service.clearQueryIndexes()
+        AgentLeases.shared.release(session: sessionID)
         VisualCursorSupport.performOnMain {
             SoftwareCursorOverlay.reset()
         }

@@ -5,7 +5,7 @@ import QuartzCore
 
 public enum VisualCursorSupport {
     public static var isEnabled: Bool {
-        visualCursorEnabled(environment: ProcessInfo.processInfo.environment)
+        visualCursorEnabled(environment: RequestEnvironment.current)
     }
 
     static func performOnMain(_ body: @escaping @MainActor () -> Void) {
@@ -28,7 +28,7 @@ public enum VisualCursorSupport {
     /// so the cursor heads for the latest target instead of replaying a backlog.
     /// `OPEN_COMPUTER_USE_VISUAL_CURSOR_BLOCKING=1` restores waiting for each animation.
     static func enqueueOnMain(startsMove: Bool, _ body: @escaping @MainActor () -> Void) {
-        if Thread.isMainThread || visualCursorBlocksActions(environment: ProcessInfo.processInfo.environment) {
+        if Thread.isMainThread || visualCursorBlocksActions(environment: RequestEnvironment.current) {
             performOnMain(body)
             return
         }
@@ -915,7 +915,7 @@ enum SoftwareCursorOverlay {
 
     private static func writeObservationSnapshot(tipPosition: CGPoint?, rotation: CGFloat?) {
         guard
-            let url = visualCursorObservationFileURL(environment: ProcessInfo.processInfo.environment)
+            let url = visualCursorObservationFileURL(environment: RequestEnvironment.current)
         else {
             return
         }

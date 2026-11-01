@@ -129,7 +129,7 @@ public enum FixtureBridge {
     public static let appName = "OpenComputerUseFixture"
     // Optional UUID isolates concurrent smoke sessions; ordinary fixture behavior is unchanged.
     private static var testNamespace: String? {
-        ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_FIXTURE_NAMESPACE"]
+        RequestEnvironment.current["OPEN_COMPUTER_USE_FIXTURE_NAMESPACE"]
             .flatMap(UUID.init(uuidString:))?.uuidString
     }
 

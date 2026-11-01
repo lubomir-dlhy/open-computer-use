@@ -582,32 +582,15 @@ private enum AppAgentSessions {
 }
 
 private enum AppAgentEnvironment {
-    private static let lock = NSLock()
-
+    /// Runs one request with the caller's OPEN_COMPUTER_USE_* settings. They live
+    /// with the serving thread, not the process, so clients can be served at once.
     static func withOverrides<T>(_ overrides: [String: String], _ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let keys = Set(overrides.keys).union(OCUConfiguration.environmentKeys)
-        let previousValues = Dictionary(uniqueKeysWithValues: keys.map { key in
-            (key, getenv(key).map { String(cString: $0) })
-        })
-        for key in OCUConfiguration.environmentKeys where overrides[key] == nil { unsetenv(key) }
-        for (key, value) in overrides {
-            setenv(key, value, 1)
+        var environment = ProcessInfo.processInfo.environment
+        for key in OCUConfiguration.environmentKeys where overrides[key] == nil {
+            environment.removeValue(forKey: key)
         }
-
-        defer {
-            for (key, previousValue) in previousValues {
-                if let previousValue {
-                    setenv(key, previousValue, 1)
-                } else {
-                    unsetenv(key)
-                }
-            }
-        }
-
-        return try body()
+        environment.merge(overrides) { _, override in override }
+        return try RequestEnvironment.with(environment, body)
     }
 }
 

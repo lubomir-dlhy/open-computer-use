@@ -362,7 +362,7 @@ public enum PermissionSupport {
     }
 
     private static func homebrewPrefixes() -> [URL] {
-        let env = ProcessInfo.processInfo.environment
+        let env = RequestEnvironment.current
         let prefixes = [
             env["HOMEBREW_PREFIX"],
             env["npm_config_prefix"],
@@ -378,7 +378,7 @@ public enum PermissionSupport {
     }
 
     private static func packageManagerPrefixes() -> [URL] {
-        let env = ProcessInfo.processInfo.environment
+        let env = RequestEnvironment.current
         let prefixes = [
             env["npm_config_prefix"],
             env["NPM_CONFIG_PREFIX"],

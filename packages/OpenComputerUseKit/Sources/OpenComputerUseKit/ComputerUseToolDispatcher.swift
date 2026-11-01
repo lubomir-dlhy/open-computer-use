@@ -53,12 +53,48 @@ public final class ComputerUseToolDispatcher {
     }
 
     private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
-        if name == "batch" || Self.actionTools.contains(name),
-           let app = arguments["app"] as? String,
-           let target = try? AppDiscovery.resolveRunning(app) {
-            ForegroundGuard.shared.arm(targetPID: target.pid)
+        let acts = name == "batch" || Self.actionTools.contains(name)
+        guard let app = arguments["app"] as? String, acts || name == "get_app_state",
+              let claim = service.leaseResource(for: app) else {
+            return try callUnclaimed(name: name, arguments: arguments)
         }
-        defer { ForegroundGuard.shared.disarm() }
+        let environment = RequestEnvironment.current
+        let wait = Self.seconds(environment["OPEN_COMPUTER_USE_LEASE_WAIT_SECONDS"], default: 30)
+        let idle = Self.seconds(environment["OPEN_COMPUTER_USE_LEASE_IDLE_SECONDS"], default: 120)
+        guard acts else {
+            // Reading never waits, but says when another agent is working there.
+            let result = try callUnclaimed(name: name, arguments: arguments)
+            guard let current = service.leaseResource(for: app),
+                  AgentLeases.shared.otherOwner(of: current.resource, session: SessionOwner.current, idleExpiry: idle) != nil else {
+                return result
+            }
+            return ToolCallResult(content: result.content + [.text(Self.busyNote(current))], isError: result.isError)
+        }
+        do {
+            return try AgentLeases.shared.perform(claim.resource, session: SessionOwner.current, wait: wait, idleExpiry: idle) {
+                let token = ForegroundGuard.shared.arm(targetPID: claim.resource.pid)
+                defer { ForegroundGuard.shared.disarm(token) }
+                return try callUnclaimed(name: name, arguments: arguments)
+            }
+        } catch is LeaseBusy {
+            throw ComputerUseError.stateUnavailable(Self.busyNote(claim) + " Waited \(Int(wait)) s.")
+        }
+    }
+
+    private static func busyNote(_ claim: (resource: LeasedResource, appName: String, singleton: Bool)) -> String {
+        if case .window = claim.resource {
+            return "Another agent is working in this \(claim.appName) window. Open your own window (e.g. click menu_path [\"File\", \"New window\"]) or pass get_app_state window_id for a free one."
+        }
+        return claim.singleton
+            ? "\(claim.appName) is in use by another agent; it has one main window, so agents take turns. Try again later."
+            : "\(claim.appName) is in use by another agent. Try again later."
+    }
+
+    private static func seconds(_ raw: String?, default value: TimeInterval) -> TimeInterval {
+        raw.flatMap(TimeInterval.init).flatMap { $0 >= 0 ? $0 : nil } ?? value
+    }
+
+    private func callUnclaimed(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         if name == "batch" {
             return try callBatch(arguments: arguments)
         }

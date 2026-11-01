@@ -80,6 +80,18 @@ Work without bringing apps forward or touching the user's windows:
   reach Chromium and AppKit menus. Do not force `click_method: "app_post"`/`"sky_click"` on elements that have an
   index; the default tries accessibility first.
 
+## Several Agents at Once (macOS)
+
+Agents connected to the same Open Computer Use app work in parallel. Each claims what it acts on:
+
+- **Apps that open more windows** (Chrome, Finder, TextEdit, Safari) are shared by window. Work in your own window
+  (`menu_path: ["File", "New window"]`); a window another agent is using makes your action wait.
+- **Apps with one main window** (System Settings, Calculator, Notes, About panels) are used by one agent at a time.
+- An action on something another agent holds waits up to 30 s (`OPEN_COMPUTER_USE_LEASE_WAIT_SECONDS`), then fails
+  with a message saying so; `get_app_state` notes it without waiting. A claim ends with the agent's turn or after
+  120 s idle (`OPEN_COMPUTER_USE_LEASE_IDLE_SECONDS`). Override the classification with
+  `OPEN_COMPUTER_USE_SINGLETON_APPS` / `OPEN_COMPUTER_USE_WINDOWED_APPS` (comma-separated names or bundle ids).
+
 ## Secrets (macOS)
 
 When a password or other secret is provided as an environment variable of the Open Computer Use

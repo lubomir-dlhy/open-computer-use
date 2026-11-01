@@ -28,3 +28,14 @@ Every fix keeps the target app inactive. Where macOS or the app forces the foreg
 - `apps/OpenComputerUse/Sources/OpenComputerUse/MacOSAppAgentProxy.swift`
 - `packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests/{SecretInputTests,BackgroundWindowTests}.swift`
 - `skills/open-computer-use/SKILL.md`, `docs/ARCHITECTURE.md`
+
+## [2026-11-01 08:10] | Task: Let several agents use Computer Use at once
+
+### 📥 User Query
+> Computer use should run things in parallel in a smart way: work that can be split by window should run side by side, and single-instance apps must handle concurrency (at most one agent working on them).
+
+### 🛠 Changes Overview
+- **Per-request environment** (`RequestEnvironment`): per-call OPEN_COMPUTER_USE_* settings and secrets live with the serving thread. The app agent no longer runs every request under one global lock with `setenv`.
+- **Leases** (`AgentLeases`): an action claims the agent's window (apps whose menus can open another window or document) or the whole app (single-window apps). Other sessions wait up to 30 s and then get a clear error; `get_app_state` notes the conflict without waiting. Claims end with the session's turn, or after 120 s idle. Input into one process is serialized for the length of a call.
+- Foreground guard and SkyLight held focus are per action and per process instead of single global slots. Locked Use scoped requests stay strictly serialized.
+- Live check (two clients on one agent): actions on two apps overlapped; a second agent was refused a single-window app with a clear message, and got it as soon as the first agent's turn ended.

@@ -13,9 +13,8 @@ public enum OCUConfiguration {
     ]
     public static var environment: [String: String] {
         let keys = environmentKeys.union(["HOME", "XDG_CONFIG_HOME"])
-        return Dictionary(uniqueKeysWithValues: keys.compactMap { key in
-            getenv(key).map { (key, String(cString: $0)) }
-        })
+        let current = RequestEnvironment.current
+        return current.filter { keys.contains($0.key) }
     }
     public static func fileURL(environment: [String: String]) throws -> URL {
         if let override = environment["OPEN_COMPUTER_USE_CONFIG_FILE"], !override.isEmpty {

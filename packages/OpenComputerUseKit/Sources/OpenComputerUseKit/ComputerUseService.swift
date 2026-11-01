@@ -262,7 +262,7 @@ func inputFallbackDebugEnabled(environment: [String: String]) -> Bool {
 }
 
 /// Activating, unhiding or raising the target puts it in front of the user's work, so it is opt-in.
-func foregroundActivationEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+func foregroundActivationEnabled(environment: [String: String] = RequestEnvironment.current) -> Bool {
     guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_FOREGROUND_ACTIVATION"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
         .lowercased()
@@ -621,7 +621,7 @@ public final class ComputerUseService {
     // variables for the duration of each request.
     private var callObservation: ActionObservation?
     var actionObservation: ActionObservation {
-        callObservation ?? .defaults(environment: ProcessInfo.processInfo.environment)
+        callObservation ?? .defaults(environment: RequestEnvironment.current)
     }
 
     /// Runs one tool call with explicit action-result options.
@@ -1087,6 +1087,18 @@ public final class ComputerUseService {
         }
     }
 
+    /// What an action on `query` claims while several agents work at once.
+    func leaseResource(for query: String) -> (resource: LeasedResource, appName: String, singleton: Bool)? {
+        guard let app = try? AppDiscovery.resolveRunning(query) else { return nil }
+        let singleton = AppConcurrency.isSingleton(
+            bundleIdentifier: app.bundleIdentifier, name: app.name, environment: RequestEnvironment.current
+        ) { MenuPath.menuItemTitles(appElement: AXUIElementCreateApplication(app.pid)) }
+        if !singleton, let windowID = currentWindowID(for: query, pid: app.pid) {
+            return (.window(pid: app.pid, windowID: windowID), app.name, false)
+        }
+        return (.app(pid: app.pid), app.name, singleton)
+    }
+
     /// The window the agent works in, or the app's focused window.
     private func currentWindowID(for query: String, pid: pid_t) -> CGWindowID? {
         if let windowID = snapshotsByApp[query.lowercased()]?.targetWindowID {
@@ -1111,7 +1123,7 @@ public final class ComputerUseService {
         try validateClickMethod(
             clickMethod,
             hasElementIndex: elementIndex != nil,
-            environment: ProcessInfo.processInfo.environment
+            environment: RequestEnvironment.current
         )
         try validateSkyClickArguments(
             method: clickMethod,
@@ -2783,7 +2795,7 @@ public final class ComputerUseService {
     }
 
     private func debugInputFallback(tool: String, targetDescription: String, snapshot: AppSnapshot) {
-        guard inputFallbackDebugEnabled(environment: ProcessInfo.processInfo.environment) else {
+        guard inputFallbackDebugEnabled(environment: RequestEnvironment.current) else {
             return
         }
 
@@ -2795,7 +2807,7 @@ public final class ComputerUseService {
     }
 
     private func debugClickDecision(_ message: String) {
-        guard inputFallbackDebugEnabled(environment: ProcessInfo.processInfo.environment) else {
+        guard inputFallbackDebugEnabled(environment: RequestEnvironment.current) else {
             return
         }
 
@@ -2826,7 +2838,7 @@ public final class ComputerUseService {
     ) throws {
         let eventPoint = inputEventPoint(fromScreenStatePoint: point)
 
-        if globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) {
+        if globalPointerFallbacksEnabled(environment: RequestEnvironment.current) {
             debugInputFallback(
                 tool: "scroll",
                 targetDescription: targetDescription,
@@ -2851,7 +2863,7 @@ public final class ComputerUseService {
         let eventPoints = globalPoints.map { inputEventPoint(fromScreenStatePoint: $0) }
         let eventStart = eventPoints[0]
         let eventEnd = eventPoints[eventPoints.count - 1]
-        let path = try dragDeliveryPath(environment: ProcessInfo.processInfo.environment, method: method)
+        let path = try dragDeliveryPath(environment: RequestEnvironment.current, method: method)
         if path != .sky, eventPoints.count > 2 || !modifiers.isEmpty {
             throw ComputerUseError.message("path and modifiers are only supported with drag_method 'sky'")
         }
@@ -2893,7 +2905,7 @@ public final class ComputerUseService {
     ) throws {
         let eventPoint = inputEventPoint(fromScreenStatePoint: point)
 
-        if globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) {
+        if globalPointerFallbacksEnabled(environment: RequestEnvironment.current) {
             debugInputFallback(
                 tool: "click",
                 targetDescription: targetDescription,
@@ -2913,7 +2925,7 @@ public final class ComputerUseService {
             )
             return
         } catch {
-            guard globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) else {
+            guard globalPointerFallbacksEnabled(environment: RequestEnvironment.current) else {
                 throw ComputerUseError.message(
                     "click could not be handled through accessibility, and global pointer fallback is disabled. Set OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 to allow physical-pointer fallback for this process."
                 )
@@ -2960,7 +2972,7 @@ public final class ComputerUseService {
                 pid: snapshot.app.pid
             )
         case .global:
-            guard globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) else {
+            guard globalPointerFallbacksEnabled(environment: RequestEnvironment.current) else {
                 throw ComputerUseError.message(
                     "click_method 'global' requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 because it may move the system pointer and change foreground focus"
                 )

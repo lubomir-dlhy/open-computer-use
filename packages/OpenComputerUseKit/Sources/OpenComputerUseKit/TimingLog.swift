@@ -6,7 +6,7 @@ import Foundation
 /// profiled without changing tool output.
 enum TimingLog {
     nonisolated(unsafe) static var enabled: Bool = {
-        let value = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_DEBUG_TIMING"]?
+        let value = RequestEnvironment.current["OPEN_COMPUTER_USE_DEBUG_TIMING"]?
             .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         return ["1", "true", "yes", "on"].contains(value)
     }()
@@ -37,7 +37,7 @@ enum InputTiming {
     static func milliseconds(
         _ variable: String,
         default fallback: Double,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = RequestEnvironment.current
     ) -> TimeInterval {
         guard let raw = environment[variable], let ms = Double(raw) else { return fallback / 1000 }
         return max(0, ms) / 1000
@@ -52,7 +52,7 @@ enum InputTiming {
     static let focusRecordSettle = milliseconds("OPEN_COMPUTER_USE_FOCUS_RECORD_SETTLE_MS", default: 10)
     /// Multiplier for the sky_click recipe gaps (move/primer/click pairs) and the renderer settle. Was 1.
     static let skyClickDelayScale: Double = {
-        guard let raw = ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_SKY_CLICK_DELAY_SCALE"], let scale = Double(raw) else { return 0.2 }
+        guard let raw = RequestEnvironment.current["OPEN_COMPUTER_USE_SKY_CLICK_DELAY_SCALE"], let scale = Double(raw) else { return 0.2 }
         return max(0, scale)
     }()
     /// Gap between Unicode chunks in type_text. Keep the established default for

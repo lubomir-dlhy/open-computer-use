@@ -5,50 +5,56 @@ import Foundation
 /// Some apps bring themselves forward on their own; Chrome does for every new tab
 /// or window, however it is created. While an action runs, and for a moment after
 /// since the activation arrives asynchronously, this hands the foreground straight
-/// back to the app the user was in. Only the action's target app is reverted.
+/// back to the app the user was in. Only an action's own target app is reverted.
 final class ForegroundGuard: @unchecked Sendable {
     static let shared = ForegroundGuard()
 
+    private struct Watch {
+        let targetPID: pid_t
+        let userPID: pid_t
+        var until: Date
+    }
+
     private let lock = NSLock()
-    private var targetPID: pid_t?
-    private var userPID: pid_t?
-    private var armedUntil = Date.distantPast
+    private var watches: [UUID: Watch] = [:]
     private var polling = false
 
-    func arm(targetPID: pid_t) {
-        guard !foregroundActivationEnabled() else { return }
-        let frontmost = Self.frontmostPID()
+    /// Starts watching `targetPID`; several actions may be watched at once.
+    func arm(targetPID: pid_t) -> UUID? {
+        guard !foregroundActivationEnabled(), let frontmost = Self.frontmostPID(), frontmost != targetPID else {
+            return nil
+        }
+        let token = UUID()
         let startPolling: Bool = lock.withLock {
-            self.targetPID = targetPID
-            userPID = frontmost == targetPID ? nil : frontmost
-            armedUntil = .distantFuture
+            watches[token] = Watch(targetPID: targetPID, userPID: frontmost, until: .distantFuture)
             defer { polling = true }
             return !polling
         }
-        guard startPolling else { return }
-        // Polled rather than observed: the CLI and MCP processes may not run a main run loop.
-        Thread.detachNewThread { [self] in
-            while lock.withLock({ Date() < armedUntil }) {
-                revertIfNeeded()
-                Thread.sleep(forTimeInterval: 0.03)
+        if startPolling {
+            // Polled rather than observed: the CLI and MCP processes may not run a main run loop.
+            Thread.detachNewThread { [self] in
+                while true {
+                    let active: [Watch] = lock.withLock {
+                        watches = watches.filter { $0.value.until > Date() }
+                        if watches.isEmpty { polling = false }
+                        return Array(watches.values)
+                    }
+                    guard !active.isEmpty else { return }
+                    if let frontmost = Self.frontmostPID(), let watch = active.first(where: { $0.targetPID == frontmost }),
+                       let app = NSRunningApplication(processIdentifier: watch.userPID), !app.isTerminated {
+                        AXUIElementSetAttributeValue(AXUIElementCreateApplication(watch.userPID), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                    }
+                    Thread.sleep(forTimeInterval: 0.03)
+                }
             }
-            lock.withLock { polling = false }
         }
+        return token
     }
 
-    func disarm(after grace: TimeInterval = 1) {
-        lock.withLock {
-            if armedUntil == .distantFuture {
-                armedUntil = Date().addingTimeInterval(grace)
-            }
-        }
-    }
-
-    private func revertIfNeeded() {
-        let (target, user) = lock.withLock { (targetPID, userPID) }
-        guard let target, let user, Self.frontmostPID() == target,
-              let app = NSRunningApplication(processIdentifier: user), !app.isTerminated else { return }
-        AXUIElementSetAttributeValue(AXUIElementCreateApplication(user), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    /// Keeps watching for `grace` after the action ends, then stops.
+    func disarm(_ token: UUID?, after grace: TimeInterval = 2.5) {
+        guard let token else { return }
+        lock.withLock { watches[token]?.until = Date().addingTimeInterval(grace) }
     }
 
     /// Read live from the accessibility server; NSWorkspace's value lags without a run loop.

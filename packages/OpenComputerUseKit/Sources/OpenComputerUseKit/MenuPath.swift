@@ -25,6 +25,16 @@ enum MenuPath {
         return Set(prefixed.map { candidates[$0] }).count == 1 ? prefixed.first : nil
     }
 
+    /// Titles of every item one level into each menu bar menu.
+    static func menuItemTitles(appElement: AXUIElement) -> [String] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return [] }
+        return elements(value as! AXUIElement, kAXChildrenAttribute)
+            .flatMap { menuItems(under: $0, isMenuBar: false) }
+            .compactMap { stringAttribute($0, kAXTitleAttribute) }
+    }
+
     static func isEnabled(_ item: AXUIElement) -> Bool {
         boolAttribute(item, kAXEnabledAttribute) != false
     }

@@ -333,19 +333,19 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
     }
 
     private let holdLock = NSLock()
-    nonisolated(unsafe) private var heldFocus: (pid: pid_t, windowID: CGWindowID, context: SkyLightSyntheticFocusContext)?
+    nonisolated(unsafe) private var heldFocus: [pid_t: (windowID: CGWindowID, context: SkyLightSyntheticFocusContext)] = [:]
 
     /// Keeps the target window synthetically focused across several inputs, so an
     /// editor opened by one step (a double-click) is not blurred before the next.
     func withHeldSyntheticFocus<T>(pid: pid_t, windowID: CGWindowID, _ body: () throws -> T) rethrows -> T {
-        guard holdLock.withLock({ heldFocus == nil }), capability.isAvailable,
+        guard holdLock.withLock({ heldFocus[pid] == nil }), capability.isAvailable,
               let context = try? beginSyntheticTargetFocus(targetPID: pid, targetWindowID: windowID) else {
             return try body()
         }
         try? makeSyntheticTargetWindowKey(context)
-        holdLock.withLock { heldFocus = (pid, windowID, context) }
+        holdLock.withLock { heldFocus[pid] = (windowID, context) }
         defer {
-            holdLock.withLock { heldFocus = nil }
+            holdLock.withLock { heldFocus[pid] = nil }
             try? endSyntheticTargetFocus(context)
         }
         return try body()
@@ -355,7 +355,7 @@ final class SkyLightSPI: WindowOcclusionControlling, @unchecked Sendable {
         targetPID: pid_t,
         targetWindowID: CGWindowID
     ) throws -> SkyLightSyntheticFocusContext {
-        if let held = holdLock.withLock({ heldFocus }), held.pid == targetPID, held.windowID == targetWindowID {
+        if let held = holdLock.withLock({ heldFocus[targetPID] }), held.windowID == targetWindowID {
             var context = held.context
             context.held = true
             return context

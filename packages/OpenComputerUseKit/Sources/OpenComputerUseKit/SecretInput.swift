@@ -26,7 +26,7 @@ public enum SecretInput {
     }
 
     /// Reads the variable and remembers its value so every later result redacts it.
-    static func resolve(_ name: String, environment: [String: String] = ProcessInfo.processInfo.environment) throws -> String {
+    static func resolve(_ name: String, environment: [String: String] = RequestEnvironment.current) throws -> String {
         guard isAllowed(name, environment: environment) else {
             throw ComputerUseError.invalidArguments(
                 "secret_env \(name) is not allowed: use a name containing PASSWORD, PASSCODE, PIN or OTP, or list it in \(allowListKey)"

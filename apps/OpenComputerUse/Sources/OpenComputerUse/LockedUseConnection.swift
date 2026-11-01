@@ -6,6 +6,7 @@ import os
 /// One authenticated Broker connection per app-agent client. Only GUI requests
 /// acquire a lease; inventory, diagnostics and protocol discovery do not unlock.
 final class LockedUseConnection: @unchecked Sendable {
+    private static let scopedRequests = NSLock()
     private let mutex = NSLock()
     private let logger = Logger(subsystem: "dev.opencomputeruse.locked-use", category: "AgentRecovery")
     private let clientSocket: Int32
@@ -49,7 +50,10 @@ final class LockedUseConnection: @unchecked Sendable {
             if drain { acknowledgeDrain() }
         }
         if scoped {
-            return try LockedUseActionScope.withValidator({ [self] in try validateAction() }, body: body)
+            // The leased desktop is driven by one request at a time.
+            return try Self.scopedRequests.withLock {
+                try LockedUseActionScope.withValidator({ [self] in try validateAction() }, body: body)
+            }
         }
         return try body()
     }
