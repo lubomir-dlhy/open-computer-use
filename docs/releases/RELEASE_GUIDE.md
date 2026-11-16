@@ -130,6 +130,8 @@ test "$(find dist/release/github -maxdepth 1 -type f -name 'open-computer-use-cl
 
 如果这里打印的不是目标版本，或者 DMG 没按目标版本名产出，不要打 tag。
 
+本地 macOS 默认的 Bash 3.2 在 `set -u` 下展开空数组时可能报 `args[@]: unbound variable`，尤其是未显式设置签名 keychain 的 Locked Use 构建。遇到此错误时，将已安装的 Bash 5 所在目录置于该次构建的 PATH 首位，再运行原命令；不要关闭签名或删掉 Locked Use 组件来绕过。CI 使用显式 signing keychain，因此不一定复现本机这条空数组路径。
+
 如果当前 checkout 里已经有和目标版本一致的 `dist/Open Computer Use.app`，也可以临时加 `--skip-build` 跳过重复构建；但在干净 checkout 里不要默认加这个参数，否则 staging 脚本会因为缺少 `dist/Open Computer Use.app` 而失败。
 
 ### 4. 提交版本 bump
@@ -170,6 +172,10 @@ workflow 会使用 `docs/releases/github/<tag>.md` 创建新 Release；如果 Re
 - `What's Changed` 必须列出本次用户可感知的 1-3 个英文变化。
 - 保留 `Full Changelog` 链接。
 
+### 7. 跟进发布后验证
+
+检查 [发布后待验证](pending-validation.md)，只对本次版本实际包含的修复跟进。发布后按已记录的维护者授权，在对应 issue 告知准确版本号并请报告者复测；更新邀请与反馈状态，不能把待验证项写成已通过。
+
 ## Release 失败时怎么查
 
 ### 1. 先看最新 run
@@ -199,6 +205,8 @@ gh run view -R iFurySt/open-computer-use <run-id> --log-failed
   - v1.1.2 曾出现 tarball 已返回 HTTP 200，但版本元数据仍返回 404 的传播窗口。可只读核对带唯一查询参数的完整 packument 辅助定位，最终仍以普通 `npm view` 与实际安装确认，不能用单个缓存响应判断需要重发。
 - `gh attestation verify` 提示 `unsupported tlog public key type: PKIX_ED25519`
   - 先用新版官方 GitHub CLI 复验。此次本机 `gh 2.49.0` 无法读取新的 Sigstore trusted root，而临时下载并核对官方 archive digest 的 `gh 2.102.0` 验证同一制品成功；旧验证器的不兼容不能据此判定 Release 签名失效。复验应同时限制 `--repo iFurySt/open-computer-use` 与 `--signer-workflow iFurySt/open-computer-use/.github/workflows/release.yml`。
+- attestation 的 `bundle_url` 下载遇到 TLS 超时
+  - 可读取 `gh api repos/iFurySt/open-computer-use/attestations/sha256:<制品摘要>`。如果响应中含有内联 `attestations[].bundle`，将各 bundle 保存为 JSONL，再用 `gh attestation verify <制品> --bundle <JSONL>` 校验；仍须指定上述仓库和 workflow 身份。此方法只更换下载路径，不跳过签名验证；不要把临时签名下载 URL 写进仓库。
 - 构建阶段失败
   - 优先看 `Build npm release artifacts`、`package-github-release-assets.sh` 的架构/归档校验、`Build Cursor Motion DMG` 或 Swift 编译错误。
 - GitHub Release 资产上传失败
@@ -209,9 +217,9 @@ gh run view -R iFurySt/open-computer-use <run-id> --log-failed
 ## 当前已知边界
 
 - `Open Computer Use` 的正式 npm / 直接下载制品需要配置 `OPEN_COMPUTER_USE_CODESIGN_P12_BASE64` / `OPEN_COMPUTER_USE_CODESIGN_P12_PASSWORD`；导入 Developer ID 身份后按同一 team 签名主 App 与 Locked Use 组件。缺少签名时正式发布失败；日常无签名构建可显式关闭 Locked Use 嵌入。
-- 如果 Open Computer Use 已使用 Developer ID 签名且 `APPLE_NOTARY_*` secrets 齐全，workflow 会 notarize 并 staple direct-download `.app` 后重新生成 app zip、checksums 和 manifest；缺少任一条件时跳过 notarization。
-- `Cursor Motion` 当前 release 资产会优先复用 `OPEN_COMPUTER_USE_CODESIGN_*` 对 app 做 `Developer ID Application` 签名；如果同时配置 `APPLE_NOTARY_API_KEY_P8_BASE64`、`APPLE_NOTARY_KEY_ID`、`APPLE_NOTARY_ISSUER_ID`、`APPLE_DEVELOPER_TEAM_ID`，workflow 会继续对 `.dmg` 执行 notarization 和 staple。
-- Open Computer Use 的正式发布必须包含 Locked Use 签名组件，缺少 Apple 签名身份时构建失败，不能静默发布不完整的 App；公证凭据缺失仍可跳过 notarization。
+- tag 发布和手动选择发布 npm 均要求 Open Computer Use 使用 Developer ID 签名，且 `APPLE_NOTARY_*` 与 `APPLE_DEVELOPER_TEAM_ID` secrets 齐全。workflow 会先公证 Locked Use payload，并为授权 bundle / Guardian 附票据，再重签、公证并 staple 外层 `.app`，最后无重编译地刷新 npm 包、app zip、checksums 和 manifest；缺少任一条件、公证不为 `Accepted`、附票据或校验失败都会阻止后续发布。手动只构建（`publish_to_npm=false`）可跳过公证，产物不能当作已公证版本。嵌套组件位于外层资源封印中，不能只在现有外层签名后 staple 子组件。发布前应核对 npm 解包后的授权 bundle 也通过 `stapler validate`，并完成安装后的冷 / 热解锁对比，详见 [冷加载诊断](../references/macos-locked-use-cold-auth-latency.md)。
+- `Cursor Motion` 当前 release 资产必须复用 `OPEN_COMPUTER_USE_CODESIGN_*` 对 app 做 `Developer ID Application` 签名；必须配置 `APPLE_NOTARY_API_KEY_P8_BASE64`、`APPLE_NOTARY_KEY_ID`、`APPLE_NOTARY_ISSUER_ID`、`APPLE_DEVELOPER_TEAM_ID`，workflow 对 `.dmg` 执行 notarization，确认 `Accepted` 后 staple 并 validate，任何失败均阻止 GitHub Release 发布。
+- Open Computer Use 的正式发布必须包含 Locked Use 签名组件，缺少 Apple 签名身份时构建失败，不能静默发布不完整的 App；正式发布不允许跳过公证；离线门槛回归为 `python3 scripts/tests/locked-use-release-policy.test.py`。
 - 签名 release App 默认自动构建并内嵌与主 App 同架构的 Locked Use 组件；支持 native / arm64 / x86_64 / universal。CI 显式设置 OPEN_COMPUTER_USE_INCLUDE_LOCKED_USE=1，制品检查覆盖四个组件的架构和严格嵌套签名。
 - `open-computer-use` npm root 包会内置六个 `os-arch` native artifacts，包体积会比 macOS-only 版本更大；release 前要确认 staging 包里包含 `dist/Open Computer Use.app`、`dist/linux/` 和 `dist/windows/`，并确认 launcher 没有声明 `optionalDependencies`。
 - 直接下载的 Linux / Windows CLI archive 只包含 native CLI / MCP runtime；`ocu js` / `ocu repl` 所需的 Node adapter 继续通过 npm 包分发。

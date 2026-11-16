@@ -108,6 +108,16 @@ let package = Package(
             path: "packages/OpenComputerUseKit/Tests/OpenComputerUseKitTests"
         ),
         .testTarget(
+            name: "GuardianInputTests",
+            dependencies: ["OCUGuardian"],
+            path: "experiments/LockedUse/Tests/GuardianInputTests"
+        ),
+        .testTarget(
+            name: "PermissionOnboardingTests",
+            dependencies: ["OpenComputerUse"],
+            path: "apps/OpenComputerUse/Tests/PermissionOnboardingTests"
+        ),
+        .testTarget(
             name: "StandaloneCursorSupportTests",
             dependencies: ["StandaloneCursorSupport"],
             path: "experiments/StandaloneCursor/Tests/StandaloneCursorSupportTests"

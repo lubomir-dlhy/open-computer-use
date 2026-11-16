@@ -51,7 +51,10 @@ public final class ComputerUseToolDispatcher {
     ]
 
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
-        SecretInput.redact(try callToolUnredacted(name: name, arguments: arguments))
+        // Calls run on threads whose autorelease pool never drains (the stdio read loop, an
+        // app-agent connection), so without one per call every screenshot's bitmap and
+        // encoded data stayed alive for the whole session.
+        try autoreleasepool { SecretInput.redact(try callToolUnredacted(name: name, arguments: arguments)) }
     }
 
     private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
@@ -313,7 +316,7 @@ public final class ComputerUseToolDispatcher {
             return try service.setValue(
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
-                value: try textOrSecret("value", in: arguments)
+                value: try textOrSecret("value", in: arguments, allowEmpty: true)
             )
         case "select_text":
             return try service.selectText(
@@ -344,9 +347,9 @@ public final class ComputerUseToolDispatcher {
     }
 
     /// Literal text, or the value of the environment variable named by `secret_env`.
-    private func textOrSecret(_ key: String, in arguments: [String: Any]) throws -> String {
+    private func textOrSecret(_ key: String, in arguments: [String: Any], allowEmpty: Bool = false) throws -> String {
         guard let raw = arguments[SecretInput.argumentKey] else {
-            return try requireString(key, in: arguments)
+            return try requireString(key, in: arguments, allowEmpty: allowEmpty)
         }
         guard arguments[key] == nil else {
             throw ComputerUseError.invalidArguments("pass either \(key) or secret_env, not both")
@@ -357,8 +360,8 @@ public final class ComputerUseToolDispatcher {
         return try SecretInput.resolve(name)
     }
 
-    private func requireString(_ key: String, in arguments: [String: Any]) throws -> String {
-        guard let value = arguments[key] as? String, !value.isEmpty else {
+    private func requireString(_ key: String, in arguments: [String: Any], allowEmpty: Bool = false) throws -> String {
+        guard let value = arguments[key] as? String, allowEmpty || !value.isEmpty else {
             throw ComputerUseError.missingArgument(key)
         }
 

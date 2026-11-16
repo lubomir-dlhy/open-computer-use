@@ -29,7 +29,23 @@ public struct ToolDefinition: @unchecked Sendable {
 }
 
 public enum ToolDefinitions {
-    public static let all: [ToolDefinition] = [
+    public static var all: [ToolDefinition] {
+        configured(virtualDisplayEnabled: VirtualDisplayConfig.current.enabled)
+    }
+
+    static func configured(virtualDisplayEnabled: Bool) -> [ToolDefinition] {
+        guard !virtualDisplayEnabled else { return definitions }
+        return definitions.map { tool in
+            guard tool.name == "get_app_state" else { return tool }
+            var schema = tool.inputSchema
+            var properties = schema["properties"] as? [String: Any] ?? [:]
+            properties.removeValue(forKey: "window_placement")
+            schema["properties"] = properties
+            return ToolDefinition(name: tool.name, description: tool.description, annotations: tool.annotations, inputSchema: schema)
+        }
+    }
+
+    private static let definitions: [ToolDefinition] = [
         ToolDefinition(
             name: "click",
             description: "Click an element by index, at x/y pixel coordinates in the last screenshot, or a menu bar item by menu_path.",
@@ -169,7 +185,7 @@ public enum ToolDefinitions {
         ),
         ToolDefinition(
             name: "set_value",
-            description: "Set the value of a settable element.",
+            description: "Set the value of a settable element and verify the actual value (text compared exactly; an empty string clears it). An unverified write is an error.",
             annotations: defaultAnnotations(),
             inputSchema: actionSchema(
                 properties: [

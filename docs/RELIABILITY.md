@@ -15,7 +15,7 @@
 - 输入默认值以跨版本可靠性优先：普通 `auto` 的 type chunk / press-key settle 保持 20 / 100 ms，`sky_key` 的 key-window / release settle 为 10 / 10 ms；六个 timing knob 均可通过对应 `OPEN_COMPUTER_USE_*` 环境变量显式覆盖。
 - 逐阶段耗时：任何命令前加 `OPEN_COMPUTER_USE_DEBUG_TIMING=1`，stderr 输出 `[open-computer-use] timing <阶段> <ms>ms`（`sky_key.*`、`sky_click.total`、`snapshot.window_capture`、`snapshot.tree_walk`、`agent_display.*`）。
 - 跑实机回归时不要在这台 Mac 上打字或点鼠标：测试会短暂把目标窗口放到前台，用户的按键会落进去，前台 fixture 也会因用户操作失去 active。
-- macOS agent display 实机回归（会短暂创建并销毁一块 virtual display）：`OPEN_COMPUTER_USE_RUN_AGENT_DISPLAY_LIVE_TEST=1 swift test --filter AgentDisplayLiveTests`
+- macOS agent display 实机回归（会短暂创建并销毁一块 virtual display）：`OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED=true OPEN_COMPUTER_USE_RUN_AGENT_DISPLAY_LIVE_TEST=1 swift test --filter AgentDisplayLiveTests`
 - macOS 其他 Desktop 实机回归（需要第二个 Desktop，测试会短暂切换 Space 启动目标）：`OPEN_COMPUTER_USE_RUN_CROSS_SPACE_LIVE_TEST=1 swift test --filter CrossSpaceLiveTests`
 - Linux runtime：`(cd apps/OpenComputerUseLinux && go test ./...)`、`./scripts/build-open-computer-use-linux.sh --arch arm64`
 - Linux 隐藏控件实测：`bash scripts/run-linux-read-back-smoke.sh /path/to/linux/open-computer-use --hidden-checks`，在私有 D-Bus / Xvfb 中验证真实 GTK 隐藏状态、属性读取、索引及页面切换；依赖与范围见 [测试说明](linux-hidden-details.md)。
@@ -62,6 +62,10 @@
 CI/CD 流程结构和 release 自动化的默认方案，统一写在 `docs/CICD.md`。
 
 ## macOS Locked Use 预检
+
+- 暗屏获取 / 重锁清理的预检、保活超时和测试边界见 [显示器唤醒与保活](locked-use-display-readiness.md)。`idle` 不代表两层保护已经释放，不应据此提前结束保活。
+
+- `python3 scripts/tests/macos-shield-placement-smoke.py`：已解锁桌面上的短暂生产遮罩几何检查；可选 `--virtual-display` 创建并清理测试自有虚拟屏。对照旧版初始化和最终覆盖，范围见 [副屏遮罩坐标](locked-use-shield-placement.md)，不执行系统锁屏或认证。
 
 - `ocu locked-use status --json`：只读检查当前会话 / runtime 权限 / 安装组件；普通 enable 安装并请求权限，status 检查签名、客户端批准与认证规则；开发诊断 profile 不属于普通开启流程。
 - `swift test --filter LockedUseTests`：许可、租约、超时、显示器变化、本地接管和重锁确认策略回归。

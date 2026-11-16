@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-var version = "1.1.2"
+var version = "1.1.4"
 
 var clickMethodValues = []string{"auto", "accessibility", "app_post", "sky_click", "global"}
 
@@ -38,7 +38,7 @@ const (
 //go:embed runtime.ps1
 var windowsRuntimeScript string
 
-const serverInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Screenshot-coordinate actions require get_app_state to return a usable image; hidden, minimized, cloaked, off-screen, or degenerate windows may return only the accessibility tree. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus. Setting OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 enables click_method 'global' plus real-pointer scroll/drag fallbacks; real keyboard input additionally requires press_key key_method=global. Physical input may move the system pointer and change foreground focus; leave the environment flag unset to keep every action on UI Automation patterns and window messages. Auto press_key always uses window messages. Global input verifies the observed process/window, current geometry, foreground and pointer hit target, and refuses delivery if these cannot be confirmed."
+const serverInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Screenshot-coordinate actions require get_app_state to return a usable image; hidden, minimized, cloaked, off-screen, or degenerate windows may return only the accessibility tree. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus. Setting OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 enables click_method 'global' plus real-pointer scroll/drag fallbacks; real keyboard input additionally requires press_key key_method=global. Physical input may move the system pointer and change foreground focus; leave the environment flag unset to keep every action on UI Automation patterns and window messages. Auto press_key always uses window messages, sent to the control that has keyboard focus, and refuses key combinations because window messages cannot carry modifier keys. Global input verifies the observed process/window, current geometry, foreground and pointer hit target, and refuses delivery if these cannot be confirmed."
 
 type toolDefinition struct {
 	Name        string         `json:"name"`
@@ -85,6 +85,7 @@ type elementRecord struct {
 	RuntimeID            []int    `json:"runtimeId,omitempty"`
 	AutomationID         string   `json:"automationId,omitempty"`
 	Name                 string   `json:"name,omitempty"`
+	NameDigest           string   `json:"nameDigest,omitempty"`
 	ControlType          string   `json:"controlType,omitempty"`
 	LocalizedControlType string   `json:"localizedControlType,omitempty"`
 	ClassName            string   `json:"className,omitempty"`
@@ -250,6 +251,8 @@ type psResponse struct {
 	Text     string       `json:"text,omitempty"`
 	Error    string       `json:"error,omitempty"`
 	Snapshot *appSnapshot `json:"snapshot,omitempty"`
+	// ObservationError is set when an action was delivered but reading the window afterwards failed.
+	ObservationError string `json:"observationError,omitempty"`
 }
 
 type service struct {
@@ -345,7 +348,11 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 		}
 		return s.pressKey(requiredString(args, "app"), requiredString(args, "key"), keyMethod)
 	case "set_value":
-		return s.setValue(requiredString(args, "app"), requiredElementIndex(args), requiredString(args, "value"))
+		value, ok := args["value"].(string)
+		if !ok {
+			return textResult("set_value value must be a string", true)
+		}
+		return s.setValue(requiredString(args, "app"), requiredElementIndex(args), value)
 	default:
 		return textResult(fmt.Sprintf("unsupportedTool(%q)", name), true)
 	}
@@ -568,7 +575,7 @@ func (s *service) actionResult(app string, request psRequest) toolCallResult {
 		request.WindowHandle = previous.WindowHandle
 	}
 	snapshot, result := s.refreshSnapshot(app, request)
-	if result.IsError {
+	if result.IsError || snapshot == nil {
 		return result
 	}
 	return snapshot.result()
@@ -578,16 +585,44 @@ func (s *service) currentSnapshot(app string) *appSnapshot {
 	return s.snapshots[strings.ToLower(app)]
 }
 
+// Without a trustworthy post-operation observation, no alias may retain the old indexes.
+func (s *service) invalidateSnapshot(app string) {
+	previous := s.currentSnapshot(app)
+	for alias, cached := range s.snapshots {
+		if alias == strings.ToLower(app) || (previous != nil && (cached == previous || cached.App.PID == previous.App.PID)) {
+			delete(s.snapshots, alias)
+		}
+	}
+}
+
 func (s *service) refreshSnapshot(app string, request psRequest) (*appSnapshot, toolCallResult) {
 	response, err := s.runBridge(request)
 	if err != nil {
-		return nil, textResult(err.Error(), true)
+		s.invalidateSnapshot(app)
+		message := err.Error()
+		if request.Tool != "get_app_state" {
+			message += "\nThe action outcome is unknown; it may already have been delivered. Run get_app_state before retrying."
+		}
+		return nil, textResult(message, true)
+	}
+	if response == nil {
+		s.invalidateSnapshot(app)
+		return nil, textResult("Windows runtime did not return a response. Run get_app_state before retrying.", true)
 	}
 	if !response.OK {
+		s.invalidateSnapshot(app)
 		return nil, textResult(response.Error, true)
 	}
+	if response.ObservationError != "" {
+		s.invalidateSnapshot(app)
+		if request.Tool == "get_app_state" {
+			return nil, textResult(response.ObservationError, true)
+		}
+		return nil, textResult("The "+request.Tool+" action was delivered, but reading "+app+" afterwards failed: "+response.ObservationError+"\nRun get_app_state before the next action instead of repeating this one.", false)
+	}
 	if response.Snapshot == nil {
-		return nil, textResult("Windows runtime did not return an app snapshot.", true)
+		s.invalidateSnapshot(app)
+		return nil, textResult("Windows runtime did not return an app snapshot. Run get_app_state before retrying.", true)
 	}
 	if request.IncludeScreenshot != nil && !*request.IncludeScreenshot {
 		response.Snapshot.ScreenshotPNGBase64 = ""
@@ -665,8 +700,12 @@ func runPowerShell(request psRequest) (*psResponse, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, operationPath)
+	hideConsoleWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
+		if request.Tool != "list_apps" && request.Tool != "get_app_state" {
+			return nil, errors.New("Windows runtime timed out after 30s; the " + request.Tool + " action may already have been delivered. Run get_app_state before retrying it.")
+		}
 		return nil, errors.New("Windows runtime timed out after 30s")
 	}
 	if err != nil {
@@ -956,7 +995,6 @@ func toolDefinitions() []toolDefinition {
 				"text_limit":         textLimitProperty("Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
 				"max_tree_nodes":     positiveIntegerProperty("Maximum accessibility tree nodes to render. Defaults to 1200."),
 				"max_tree_depth":     positiveIntegerProperty("Maximum accessibility tree depth to render. Defaults to 64."),
-				"window_placement":   enumStringProperty("keep (default) leaves the window where it is. agent_display and restore are macOS-only and not supported on Windows.", windowPlacementValues),
 			}, []string{"app"}),
 		},
 		{
@@ -982,7 +1020,7 @@ func toolDefinitions() []toolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"app":        stringProperty("App name or bundle identifier"),
 				"key":        stringProperty("Key or key-combination to press"),
-				"key_method": enumStringProperty("Keyboard delivery: auto (default window messages), global (real keys, requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1), or macOS-only sky_key (unsupported on Windows).", pressKeyMethodValues),
+				"key_method": enumStringProperty("Keyboard delivery: auto (default window messages to the focused control; key combinations need global), global (real keys, requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1), or macOS-only sky_key (unsupported on Windows).", pressKeyMethodValues),
 			}, []string{"app", "key"}),
 		},
 		{
@@ -998,7 +1036,7 @@ func toolDefinitions() []toolDefinition {
 		},
 		{
 			Name:        "set_value",
-			Description: "Set the value of a settable accessibility element. This tool is part of plugin `Computer Use`.",
+			Description: "Set the value of a settable accessibility element and verify the actual value. Text is compared exactly, including whitespace; an empty string clears it. Unverified writes return an error. This tool is part of plugin `Computer Use`.",
 			Annotations: defaultAnnotations(),
 			InputSchema: objectSchema(map[string]any{
 				"app":           stringProperty("App name or bundle identifier"),
@@ -1414,27 +1452,16 @@ func readJSONSource(inline, file string) (string, error) {
 
 func runMCP(stdin io.Reader, stdout io.Writer) error {
 	svc := newService()
-	decoder := json.NewDecoder(stdin)
-	encoder := json.NewEncoder(stdout)
-	for {
-		var request map[string]any
-		if err := decoder.Decode(&request); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			_ = encoder.Encode(jsonRPCError(nil, -32700, "Invalid JSON-RPC payload"))
-			continue
-		}
-		response := handleMCPRequest(request, svc)
-		if response != nil {
-			if err := encoder.Encode(response); err != nil {
-				return err
-			}
-		}
-	}
+	return runMCPTransport(stdin, stdout, func(request map[string]any) map[string]any {
+		return handleMCPRequest(request, svc)
+	})
 }
 
 func handleMCPRequest(request map[string]any, svc *service) map[string]any {
+	// Notifications never execute request methods or produce a response.
+	if _, hasID := request["id"]; !hasID {
+		return nil
+	}
 	id := request["id"]
 	method, _ := request["method"].(string)
 	params, _ := request["params"].(map[string]any)
