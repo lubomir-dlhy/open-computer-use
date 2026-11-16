@@ -2,7 +2,7 @@
 /// lifetime in that document, so a later snapshot can be diffed against an earlier one.
 let browserPageScript = #"""
 (() => {
-  if (window.__ocu && window.__ocu.v === 2) return;
+  if (window.__ocu && window.__ocu.v === 3) return;
   const refs = new Map();
   const ids = new WeakMap();
   let next = 1;
@@ -142,7 +142,7 @@ let browserPageScript = #"""
   };
   const hasInteractiveInside = (el) => !!el.querySelector?.("a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=option],[role=menuitem],[role=tab]");
 
-  function snapshot(maxChars) {
+  function snapshot(maxChars, scopeRef) {
     const lines = [];
     let buffer = "";
     let used = 0;
@@ -218,7 +218,8 @@ let browserPageScript = #"""
       for (const child of root.childNodes) walk(child);
       if (block) flush();
     };
-    if (document.body) walk(document.body);
+    const root = scopeRef == null ? document.body : resolve({ ref: scopeRef });
+    if (root) walk(root);
     flush();
     const doc = document.scrollingElement ?? document.documentElement;
     return {
@@ -226,8 +227,62 @@ let browserPageScript = #"""
       url: location.href,
       scroll: `${Math.round(doc.scrollTop)}/${Math.max(0, Math.round(doc.scrollHeight - innerHeight))}`,
       lines,
-      truncated
+      truncated,
+      challenge: challenge()
     };
+  }
+
+  // A bot check that stands in for the page; the agent should not read it as the site.
+  function challenge() {
+    const has = (selector) => { try { return !!document.querySelector(selector); } catch { return false; } };
+    const title = document.title.toLowerCase();
+    if (has("#challenge-form, #cf-challenge-running, .cf-turnstile, iframe[src*='challenges.cloudflare.com']") || title === "just a moment...")
+      return "Cloudflare challenge";
+    if (has("iframe[src*='captcha-delivery.com']")) return "DataDome captcha";
+    if (has("#px-captcha")) return "PerimeterX (HUMAN) captcha";
+    if (has("iframe[src*='hcaptcha.com']")) return "hCaptcha";
+    if (has("iframe[src*='recaptcha'][src*='bframe'], iframe[title*='recaptcha challenge' i]")) return "reCAPTCHA challenge";
+    if (title.startsWith("access denied") && /reference #\d/i.test(document.body?.innerText ?? "")) return "Akamai access denied";
+    return null;
+  }
+
+  // schema.org JSON-LD, product meta tags and microdata: prices and stock without reading the layout.
+  function structured() {
+    const jsonld = [];
+    const visit = (node) => {
+      if (Array.isArray(node)) { node.forEach(visit); return; }
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node["@graph"])) { node["@graph"].forEach(visit); return; }
+      jsonld.push(node);
+    };
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try { visit(JSON.parse(script.textContent)); } catch {}
+    }
+    const meta = {};
+    for (const tag of document.querySelectorAll("meta[property], meta[name], meta[itemprop]")) {
+      const key = tag.getAttribute("property") || tag.getAttribute("itemprop") || tag.getAttribute("name");
+      if (/^(og:(title|type|url|price|availability)|og:price:|product:|twitter:data|price|pricecurrency|availability|sku|gtin)/i.test(key) && tag.content)
+        meta[key] = clean(tag.content, 200);
+    }
+    const microdata = [...document.querySelectorAll("[itemscope][itemtype*='schema.org/Product' i]")].slice(0, 20).map((item) => {
+      const prop = (name) => {
+        const el = item.querySelector(`[itemprop="${name}"]`);
+        return el ? clean(el.getAttribute("content") ?? el.getAttribute("href") ?? el.innerText, 120) : undefined;
+      };
+      return { name: prop("name"), sku: prop("sku"), gtin: prop("gtin13") ?? prop("gtin"), price: prop("price"),
+               priceCurrency: prop("priceCurrency"), availability: prop("availability"), url: prop("url") };
+    });
+    const embedded = [...document.querySelectorAll("script[type='application/json'], script#__NEXT_DATA__, script#__NUXT_DATA__")]
+      .filter((script) => script.textContent.length > 2)
+      .map((script) => ({ selector: script.id ? `script#${script.id}` : null, bytes: script.textContent.length }))
+      .filter((entry) => entry.selector);
+    return { jsonld, meta, microdata, embedded };
+  }
+
+  function embedded(selector) {
+    const script = document.querySelector(selector);
+    if (!script) throw new Error(`no element matches ${selector}`);
+    return script.textContent;
   }
 
   const deepQueryAll = (selector, root = document) => {
@@ -375,7 +430,7 @@ let browserPageScript = #"""
     return `${location.href}|${document.readyState}|${document.getElementsByTagName("*").length}|${document.body?.innerText.length ?? 0}`;
   }
   Object.defineProperty(window, "__ocu", {
-    value: { v: 2, snapshot, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
+    value: { v: 3, snapshot, structured, embedded, challenge, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
              fileInput: (target) => { const el = resolve(target); return el.tagName === "INPUT" && el.type === "file" ? el : null; } },
     enumerable: false,
     configurable: true

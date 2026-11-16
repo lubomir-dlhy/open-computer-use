@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Open Computer Use Browser",
   "description": "Lets Open Computer Use drive Chrome tabs in the background.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtuU1QYrLNHtNys9NGFDcrlWO+tagkfc05audlvqzU4/PvtEWhR3nRG+5jZgp+joSfzBDbz51a9KsYskmeusTb01lQiHYSZMlNeJOgYACOLcaceU836yZGMP91YR7oKpF/+dET1Lv9ufEYAMWxbLzB4qIwImU9nEkkJoDBcfcJUII/uCVF883705kCdpZuhRmMtOVJbsM0yb8qU8aOq/eD3Hk9EugNo7HuOiyiagsDoKYd9hfWM1uA3f5fz/ppTIJ8oXUDX+RKkCkafAadAvbt+gamxFCYCRvkyrRhGZE0Wn8xNn53SrLnrynZZ+u/YtGE8BRSM7BMPPv9vdgEtmTEwIDAQAB",
   "background": {
     "service_worker": "background.js",

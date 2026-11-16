@@ -61,7 +61,8 @@ Chrome, through the Open Computer Use Browser extension (background tabs; Chrome
 
 - \`const tab = await cua.browser.open(url, { profile })\` (profile: the Chrome profile's name or email; work for an organisation goes in its profile) shows a snapshot of \`[ref] role "name"\` lines (\`{ emit: false }\` hides it); also \`await cua.browser.tabs()\` and \`await cua.browser.claim(tabId)\`.
 - Targets: a ref number, a CSS selector string, \`[x, y]\`, or \`{ name: "Submit" }\`.
-- \`tab.click(target, { clickCount?, button?, modifiers?, hold? })\`, \`tab.hover(target)\`, \`tab.type(target, text, { clear?, secretEnv?, format? })\`, \`tab.key("Enter")\`, \`tab.scroll(target, "down", 1)\`, \`tab.drag(from, to)\` (real HTML5 drag-and-drop), \`tab.select(target, optionText)\`, \`tab.upload(target, [paths])\`, \`tab.download(target)\`, \`tab.wait({ url?, load?, selector? })\`, \`tab.dialog(accept, promptText?)\`, \`tab.navigate(url)\`, \`tab.back()\`, \`tab.reload()\`, \`tab.snapshot()\`, \`tab.screenshot()\`, \`await tab.evaluate(expression)\` (parsed JSON).
+- \`tab.click(target, { clickCount?, button?, modifiers?, hold? })\`, \`tab.hover(target)\`, \`tab.type(target, text, { clear?, secretEnv?, format? })\`, \`tab.key("Enter")\`, \`tab.scroll(target, "down", 1)\`, \`tab.drag(from, to)\` (real HTML5 drag-and-drop), \`tab.select(target, optionText)\`, \`tab.upload(target, [paths])\`, \`tab.download(target)\`, \`tab.wait({ url?, load?, selector? })\`, \`tab.dialog(accept, promptText?)\`, \`tab.navigate(url)\`, \`tab.back()\`, \`tab.reload()\`, \`tab.snapshot({ find?, ref?, maxChars? })\`, \`tab.screenshot()\`, \`await tab.evaluate(expression)\` (parsed JSON).
+- Data without the layout: \`await tab.extract()\` (one line per product with price and stock, then JSON-LD, meta and microdata; \`tab.extract("script#__NEXT_DATA__")\` reads embedded JSON), \`await tab.requests({ filter?, type? })\` lists the page's requests and \`await tab.response("r12")\` returns one body (parsed when JSON). \`tab.wait({ load: "networkidle" })\` waits until nothing loads.
 - Tabs you open close when your turn ends; \`await tab.keep()\` keeps one that holds the result.
 
 After actions, call \`getAXState()\` in the same js invocation when the next decision depends on the updated UI. Re-derive element indexes from fresh state after navigation or layout changes. Prefer element indexes over coordinates. Open Computer Use keeps its existing local safety gates, including password-manager denial and explicit authorization for global pointer fallbacks.`;
@@ -376,7 +377,7 @@ export function createCuaApi(native, activeOutput) {
     return Object.freeze({
       id: tab,
       async snapshot(options = {}) {
-        const { text } = await browser("snapshot", { ...id, ...(options.maxChars ? { max_chars: options.maxChars } : {}) });
+        const { text } = await browser("snapshot", { ...id, ...pick(options, { maxChars: "max_chars", find: "find", ref: "ref" }) });
         if (options.emit !== false) activeOutput().write(text, "cua.browser");
         return text;
       },
@@ -402,6 +403,15 @@ export function createCuaApi(native, activeOutput) {
       reload: (options = {}) => run("reload", {}, options),
       keep: (status = "deliverable") => run("keep", { status }),
       close: () => run("close", {}),
+      extract: (selector, options = {}) => run("extract", { ...(selector ? { selector } : {}), ...pick(options, { maxChars: "max_chars" }) }, options),
+      requests: (options = {}) => run("requests", pick(options, { filter: "filter", type: "type" }), options),
+      async response(request, options = {}) {
+        const text = await run("requests", { request: String(request), ...pick(options, { maxChars: "max_chars" }) }, options);
+        const lines = text.split("\n").slice(1);
+        if (lines[0]?.startsWith("Request body: ")) lines.shift();
+        const body = lines.join("\n");
+        try { return JSON.parse(body); } catch { return text; }
+      },
       async evaluate(expression) {
         const { text } = await browser("evaluate", { ...id, expression });
         try { return JSON.parse(text); } catch { return text; }

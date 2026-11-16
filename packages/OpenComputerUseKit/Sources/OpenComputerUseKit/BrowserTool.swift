@@ -12,7 +12,7 @@ final class BrowserTool {
     static let actions = [
         "tabs", "open", "claim", "navigate", "back", "forward", "reload", "close", "keep", "show",
         "snapshot", "screenshot", "click", "hover", "type", "key", "scroll", "drag", "select",
-        "wait", "dialog", "upload", "download", "evaluate",
+        "wait", "dialog", "upload", "download", "evaluate", "requests", "extract",
     ]
 
     private struct Snapshot {
@@ -21,8 +21,13 @@ final class BrowserTool {
         var scroll: String
         var lines: [String]
         var truncated: Int
+        var challenge: String?
 
-        var header: String { "\(title.isEmpty ? "(untitled)" : title) — \(url) [scroll \(scroll)]" }
+        var header: String {
+            let base = "\(title.isEmpty ? "(untitled)" : title) — \(url) [scroll \(scroll)]"
+            guard let challenge else { return base }
+            return base + "\nBot check: \(challenge). This is not the site's page: wait (action wait, load networkidle) or ask the user to solve it (action show)."
+        }
     }
 
     func call(_ arguments: [String: Any]) throws -> ToolCallResult {
@@ -39,7 +44,8 @@ final class BrowserTool {
             bridge.session { $0.currentTab = id }
             waitForLoad(id, timeout: wait(arguments, default: 15))
             let place = bridge.profile(ofTab: id).map { " in profile \($0.label)" } ?? ""
-            return try page(id, arguments, note: "Tab \(id) opened in the background\(place). It closes when your turn ends unless you keep it (action keep).")
+            let opened = "Tab \(id) opened in the background\(place). It closes when your turn ends unless you keep it (action keep)."
+            return try page(id, arguments, note: [opened, navigationStatus(id)].compactMap { $0 }.joined(separator: "\n"))
         case "claim":
             let id = try int("tab", arguments)
             _ = try bridge.call("claimUserTab", ["tabId": id])
@@ -52,7 +58,7 @@ final class BrowserTool {
             let before = href(id)
             _ = try bridge.call("tabCommand", params)
             waitForLoad(id, timeout: wait(arguments, default: 15), leaving: action == "reload" ? nil : before)
-            return try page(id, arguments)
+            return try page(id, arguments, note: navigationStatus(id))
         case "close":
             let id = try tab(arguments)
             _ = try bridge.call("tabCommand", ["tabId": id, "command": "close"])
@@ -76,7 +82,28 @@ final class BrowserTool {
             _ = try bridge.call("tabCommand", ["tabId": id, "command": "show"])
             return .text("ok; tab \(id) is in front")
         case "snapshot":
-            return try page(try tab(arguments), arguments)
+            let id = try tab(arguments)
+            if let pattern = arguments["find"] as? String {
+                return try find(id, pattern, arguments)
+            }
+            if let ref = arguments["ref"] as? Int {
+                let scoped = try snapshot(id, arguments, scope: ref)
+                return .text(([scoped.header, "Within [\(ref)]:"] + render(scoped)).joined(separator: "\n"))
+            }
+            return try page(id, arguments)
+        case "requests":
+            let id = try tab(arguments)
+            if let request = arguments["request"] as? String {
+                return try responseBody(id, request, arguments)
+            }
+            return try listRequests(id, arguments)
+        case "extract":
+            let id = try tab(arguments)
+            if let selector = arguments["selector"] as? String {
+                let text = try call(id, "embedded", selector) as? String ?? ""
+                return .text(Self.clip(text, arguments["max_chars"] as? Int ?? 8000, hint: "raise max_chars, or read a part with evaluate"))
+            }
+            return try extract(id, arguments)
         case "screenshot":
             let id = try tab(arguments)
             let result = try bridge.cdp(id, "Page.captureScreenshot", ["format": "jpeg", "quality": 70], timeout: 5)
@@ -97,6 +124,13 @@ final class BrowserTool {
                     let states = load == "domcontentloaded" ? ["interactive", "complete"] : ["complete"]
                     try poll(timeout, "the page to load") {
                         ((try? evaluate(id, "document.readyState")) as? String).map(states.contains) == true
+                    }
+                    if load == "networkidle" {
+                        // Quiet: nothing loading (streams and long polls aside) for half a second.
+                        try poll(timeout, "the network to go quiet") {
+                            guard let log = try? networkLog(id) else { return true }
+                            return (log["loading"] as? Int ?? 0) == 0 && (log["quietMs"] as? Int ?? 0) >= 500
+                        }
                     }
                 }
                 if let selector = arguments["selector"] as? String {
@@ -422,16 +456,265 @@ final class BrowserTool {
         return Array(changes.prefix(limit)) + ["… \(changes.count - limit) more changes; take a snapshot"]
     }
 
-    private func snapshot(_ id: Int, _ arguments: [String: Any]) throws -> Snapshot {
-        let maxChars = arguments["max_chars"] as? Int ?? 6000
-        guard let raw = try call(id, "snapshot", maxChars) as? [String: Any] else {
+    /// A scoped snapshot is not what later diffs compare against: it leaves the rest of the page out.
+    private func snapshot(_ id: Int, _ arguments: [String: Any], scope: Int? = nil, maxChars: Int? = nil) throws -> Snapshot {
+        let budget = maxChars ?? arguments["max_chars"] as? Int ?? 6000
+        guard let raw = try call(id, "snapshot", budget, scope.map { $0 as Any } ?? NSNull()) as? [String: Any] else {
             throw ComputerUseError.stateUnavailable("the page returned no snapshot")
         }
         let snapshot = Snapshot(title: raw["title"] as? String ?? "", url: raw["url"] as? String ?? "",
                                 scroll: raw["scroll"] as? String ?? "", lines: raw["lines"] as? [String] ?? [],
-                                truncated: raw["truncated"] as? Int ?? 0)
-        bridge.session { $0.snapshots[id] = snapshot.lines }
+                                truncated: raw["truncated"] as? Int ?? 0, challenge: raw["challenge"] as? String)
+        if scope == nil {
+            bridge.session { $0.snapshots[id] = snapshot.lines }
+        }
         return snapshot
+    }
+
+    // MARK: - Finding, network and structured data
+
+    /// Snapshot lines matching a pattern, with one line of context each side.
+    private func find(_ id: Int, _ pattern: String, _ arguments: [String: Any]) throws -> ToolCallResult {
+        let regex = try (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]))
+            ?? (NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: pattern), options: [.caseInsensitive]))
+        let snapshot = try snapshot(id, arguments, maxChars: 400_000)
+        let lines = snapshot.lines
+        let hits = lines.indices.filter { regex.firstMatch(in: lines[$0], range: NSRange(lines[$0].startIndex..., in: lines[$0])) != nil }
+        guard !hits.isEmpty else {
+            return .text("\(snapshot.header)\nNo snapshot line matches \(json(pattern)).")
+        }
+        var shown = IndexSet()
+        for hit in hits { shown.insert(integersIn: max(0, hit - 1)...min(lines.count - 1, hit + 1)) }
+        var output = [snapshot.header, "\(hits.count) \(hits.count == 1 ? "line matches" : "lines match") \(json(pattern)):"]
+        var previous: Int?
+        for index in shown {
+            if let previous, index > previous + 1 { output.append("…") }
+            output.append(lines[index])
+            previous = index
+        }
+        return .text(Self.clip(output.joined(separator: "\n"), arguments["max_chars"] as? Int ?? 6000, hint: "narrow the pattern"))
+    }
+
+    private func networkLog(_ id: Int) throws -> [String: Any] {
+        try bridge.call("networkLog", ["tabId": id]) as? [String: Any] ?? [:]
+    }
+
+    /// The HTTP status of the page's last load, with its redirects; nil when unknown.
+    private func navigationStatus(_ id: Int) -> String? {
+        guard let log = try? networkLog(id), let entries = log["entries"] as? [[String: Any]],
+              let last = entries.last(where: { $0["main"] as? Bool == true }) else { return nil }
+        var parts: [String] = []
+        if let failed = last["failed"] as? String {
+            parts.append("Load failed: \(failed)")
+        } else if let status = last["status"] as? Int {
+            parts.append("HTTP \(status)")
+        } else {
+            return nil
+        }
+        let byID = Dictionary(entries.compactMap { entry in (entry["id"] as? Int).map { ($0, entry) } }, uniquingKeysWith: { first, _ in first })
+        var hops: [String] = []
+        var from = last["redirectedFrom"] as? Int
+        while let current = from, let entry = byID[current], hops.count < 10 {
+            hops.insert("\(entry["url"] as? String ?? "") (\(entry["status"] as? Int ?? 0))", at: 0)
+            from = entry["redirectedFrom"] as? Int
+        }
+        if !hops.isEmpty { parts.append("redirected from " + hops.joined(separator: " → ")) }
+        return parts.joined(separator: ", ")
+    }
+
+    private static let defaultRequestTypes: Set<String> = ["document", "xhr", "fetch"]
+
+    private func listRequests(_ id: Int, _ arguments: [String: Any]) throws -> ToolCallResult {
+        let log = try networkLog(id)
+        let entries = log["entries"] as? [[String: Any]] ?? []
+        let navigation = log["navigation"] as? Int ?? 0
+        let types = (arguments["type"] as? String).map { Set($0.lowercased().split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }) }
+        let filter = arguments["filter"] as? String
+        let regex = filter.flatMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+        let page = entries.last(where: { $0["main"] as? Bool == true })?["url"] as? String
+        let origin = page.flatMap { URL(string: $0) }.flatMap { url in url.host.map { "\(url.scheme ?? "https")://\($0)\(url.port.map { ":\($0)" } ?? "")" } }
+        let matching = entries.filter { entry in
+            let type = (entry["type"] as? String ?? "other").lowercased()
+            let mime = entry["mimeType"] as? String ?? ""
+            if let types {
+                guard types.contains("all") || types.contains(type) else { return false }
+            } else {
+                guard entry["navigation"] as? Int == navigation,
+                      Self.defaultRequestTypes.contains(type) || mime.contains("json") else { return false }
+            }
+            guard let filter else { return true }
+            let url = entry["url"] as? String ?? ""
+            if let regex { return regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil }
+            return url.localizedCaseInsensitiveContains(filter)
+        }
+        guard !matching.isEmpty else {
+            let attached = log["attached"] as? Bool ?? false
+            return .text(attached || !entries.isEmpty
+                ? "No matching requests since this page loaded\(types == nil ? " (documents, XHR, fetch and JSON; type all shows every type)" : "")."
+                : "No requests recorded yet: the tab's network log starts with the first action in it. Reload (action reload) to record the page load.")
+        }
+        let limit = 40
+        var lines = ["\(matching.count) request\(matching.count == 1 ? "" : "s")\(matching.count > limit ? ", the last \(limit) shown (narrow with filter)" : ""). Read a response with requests and request: \"r<id>\"."]
+        lines += matching.suffix(limit).map { Self.requestLine($0, origin: origin) }
+        if let loading = log["loading"] as? Int, loading > 0 { lines.append("\(loading) still loading.") }
+        return .text(lines.joined(separator: "\n"))
+    }
+
+    private static func requestLine(_ entry: [String: Any], origin: String?) -> String {
+        var url = entry["url"] as? String ?? ""
+        if let origin, url.hasPrefix(origin + "/") { url = String(url.dropFirst(origin.count)) }
+        if url.count > 160 { url = String(url.prefix(159)) + "…" }
+        let status: String
+        if let failed = entry["failed"] as? String {
+            status = "failed (\(failed))"
+        } else if let code = entry["status"] as? Int {
+            status = String(code)
+        } else {
+            status = "loading"
+        }
+        var parts = ["r\(entry["id"] as? Int ?? 0)", entry["method"] as? String ?? "GET", status, (entry["type"] as? String ?? "").lowercased()]
+        if let mime = entry["mimeType"] as? String, !mime.isEmpty { parts.append(mime) }
+        if let size = entry["size"] as? Double, size > 0 { parts.append(byteCount(Int(size))) }
+        parts.append(url)
+        if entry["redirectedTo"] != nil { parts.append("→ redirect") }
+        if entry["fromCache"] as? Bool == true { parts.append("(cached)") }
+        return parts.joined(separator: " ")
+    }
+
+    private static func byteCount(_ bytes: Int) -> String {
+        bytes < 1024 ? "\(bytes) B" : bytes < 1_048_576 ? String(format: "%.1f KB", Double(bytes) / 1024) : String(format: "%.1f MB", Double(bytes) / 1_048_576)
+    }
+
+    private func responseBody(_ id: Int, _ request: String, _ arguments: [String: Any]) throws -> ToolCallResult {
+        guard let number = Int(request.trimmingCharacters(in: CharacterSet(charactersIn: "rR "))) else {
+            throw ComputerUseError.invalidArguments("request is an id from the requests list, such as r12")
+        }
+        let entries = try networkLog(id)["entries"] as? [[String: Any]] ?? []
+        guard let entry = entries.first(where: { $0["id"] as? Int == number }), let requestID = entry["requestId"] as? String else {
+            throw ComputerUseError.invalidArguments("no request r\(number) in this tab's log; list them with action requests")
+        }
+        var lines = ["\(entry["method"] as? String ?? "GET") \(entry["status"] as? Int ?? 0) \(entry["mimeType"] as? String ?? "") \(entry["url"] as? String ?? "")"]
+        if let post = entry["postData"] as? String { lines.append("Request body: \(post)") }
+        if let target = entry["redirectedTo"] as? String {
+            lines.append("Redirected to \(target); a redirect has no body.")
+            return .text(lines.joined(separator: "\n"))
+        }
+        let result: [String: Any]
+        do {
+            result = try bridge.cdp(id, "Network.getResponseBody", ["requestId": requestID], timeout: 10)
+        } catch {
+            throw ComputerUseError.stateUnavailable("Chrome no longer has the body of r\(number) (\(error.localizedDescription)); repeat the action that loads it and read it right after")
+        }
+        var body = result["body"] as? String ?? ""
+        if result["base64Encoded"] as? Bool == true {
+            guard let data = Data(base64Encoded: body), let text = String(data: data, encoding: .utf8) else {
+                lines.append("Binary body, \(Self.byteCount(Data(base64Encoded: body)?.count ?? 0)).")
+                return .text(lines.joined(separator: "\n"))
+            }
+            body = text
+        }
+        lines.append(body)
+        return .text(Self.clip(lines.joined(separator: "\n"), arguments["max_chars"] as? Int ?? 8000, hint: "raise max_chars, or fetch and filter it with evaluate"))
+    }
+
+    private func extract(_ id: Int, _ arguments: [String: Any]) throws -> ToolCallResult {
+        guard let raw = try call(id, "structured") as? [String: Any] else {
+            throw ComputerUseError.stateUnavailable("the page returned no structured data")
+        }
+        let jsonld = raw["jsonld"] as? [[String: Any]] ?? []
+        let meta = raw["meta"] as? [String: Any] ?? [:]
+        let microdata = (raw["microdata"] as? [[String: Any]] ?? []).filter { $0.values.contains { !($0 is NSNull) } }
+        let embedded = raw["embedded"] as? [[String: Any]] ?? []
+        var lines = Self.productSummaries(jsonld: jsonld, microdata: microdata, meta: meta)
+        if !jsonld.isEmpty { lines.append("JSON-LD: " + compactJSON(jsonld)) }
+        if !meta.isEmpty { lines.append("Meta: " + compactJSON(meta)) }
+        if !microdata.isEmpty { lines.append("Microdata: " + compactJSON(microdata)) }
+        if !embedded.isEmpty {
+            lines.append("Embedded JSON (read with extract and selector): " + embedded.map {
+                "\($0["selector"] as? String ?? "") \(Self.byteCount($0["bytes"] as? Int ?? 0))"
+            }.joined(separator: ", "))
+        }
+        if lines.isEmpty {
+            return .text("No structured data on this page. Try action requests for the site's own API, or snapshot with find.")
+        }
+        return .text(Self.clip(lines.joined(separator: "\n"), arguments["max_chars"] as? Int ?? 6000, hint: "raise max_chars"))
+    }
+
+    /// One line per product: what a price or stock check needs, before the raw data.
+    static func productSummaries(jsonld: [[String: Any]], microdata: [[String: Any]], meta: [String: Any]) -> [String] {
+        func types(_ node: [String: Any]) -> [String] {
+            (node["@type"] as? [String]) ?? [(node["@type"] as? String)].compactMap { $0 }
+        }
+        func text(_ value: Any?) -> String? {
+            switch value {
+            case let string as String: return string.isEmpty ? nil : string
+            case let number as NSNumber: return number.stringValue
+            case let object as [String: Any]: return text(object["name"] ?? object["@id"])
+            case let array as [Any]: return array.compactMap(text).first
+            default: return nil
+            }
+        }
+        func availability(_ value: Any?) -> String? {
+            text(value).map { $0.replacingOccurrences(of: "https://schema.org/", with: "").replacingOccurrences(of: "http://schema.org/", with: "") }
+        }
+        func offerText(_ raw: Any?) -> String? {
+            let offers = (raw as? [[String: Any]]) ?? (raw as? [String: Any]).map { [$0] } ?? []
+            let rendered = offers.prefix(3).compactMap { offer -> String? in
+                let currency = text(offer["priceCurrency"]).map { " \($0)" } ?? ""
+                var price: String?
+                if let value = text(offer["price"]) {
+                    price = value + currency
+                } else if let low = text(offer["lowPrice"]) {
+                    price = "\(low)–\(text(offer["highPrice"]) ?? "?")\(currency)"
+                } else if let spec = offer["priceSpecification"] {
+                    price = offerText(spec)
+                }
+                let parts = [price, availability(offer["availability"]).map { "(\($0))" }, text(offer["seller"]).map { "seller \($0)" }].compactMap { $0 }
+                return parts.isEmpty ? nil : parts.joined(separator: " ")
+            }
+            return rendered.isEmpty ? nil : rendered.joined(separator: "; ") + (offers.count > 3 ? "; …\(offers.count - 3) more offers" : "")
+        }
+        var lines: [String] = []
+        var nodes = jsonld
+        // A product group lists its variants; each is a product of its own.
+        for node in jsonld where types(node).contains("ProductGroup") {
+            nodes += (node["hasVariant"] as? [[String: Any]]) ?? []
+        }
+        for node in nodes where types(node).contains(where: { $0 == "Product" || $0 == "ProductGroup" }) {
+            var parts = ["Product \(json(text(node["name"]) ?? "?"))"]
+            if let offer = offerText(node["offers"]) { parts.append(offer) }
+            for key in ["sku", "gtin13", "gtin", "mpn"] {
+                if let value = text(node[key]) { parts.append("\(key) \(value)"); break }
+            }
+            if let brand = text(node["brand"]) { parts.append("brand \(brand)") }
+            if let url = text(node["url"]) { parts.append(url) }
+            lines.append(parts.joined(separator: ", "))
+            if lines.count >= 20 { break }
+        }
+        if lines.isEmpty {
+            for item in microdata where item["price"] is String {
+                let price = [item["price"], item["priceCurrency"]].compactMap { $0 as? String }.joined(separator: " ")
+                let stock = availability(item["availability"]).map { " (\($0))" } ?? ""
+                lines.append("Product \(json(item["name"] as? String ?? "?")), \(price)\(stock)\((item["sku"] as? String).map { ", sku \($0)" } ?? "")")
+            }
+        }
+        if lines.isEmpty, let amount = text(meta["product:price:amount"] ?? meta["og:price:amount"]) {
+            let currency = text(meta["product:price:currency"] ?? meta["og:price:currency"]).map { " \($0)" } ?? ""
+            let stock = availability(meta["product:availability"] ?? meta["og:availability"]).map { " (\($0))" } ?? ""
+            lines.append("Product \(json(text(meta["og:title"]) ?? "?")), \(amount)\(currency)\(stock)")
+        }
+        return lines
+    }
+
+    private func compactJSON(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return "\(value)" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func clip(_ text: String, _ limit: Int, hint: String) -> String {
+        guard text.count > limit, limit > 0 else { return text }
+        return String(text.prefix(limit)) + "… (\(text.count - limit) more chars; \(hint))"
     }
 
     // MARK: - Waiting

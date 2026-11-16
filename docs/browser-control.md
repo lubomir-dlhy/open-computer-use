@@ -41,14 +41,27 @@ MCP client ── browser tool ── BrowserBridge ──unix socket──▶ o
 | `navigate`, `back`, `forward`, `reload`, `close` | Tab navigation through the tabs API; `close` only closes tabs the agent opened. |
 | `keep` | Keep a tab after the turn (`deliverable`, or `handoff` to continue later). |
 | `show` | Bring the tab forward (only when the user wants to watch). |
-| `snapshot`, `screenshot` | Page snapshot; `Page.captureScreenshot` of the tab. |
+| `snapshot`, `screenshot` | Page snapshot (`find`: only matching lines with a line of context; `ref`: only that element's part); `Page.captureScreenshot` of the tab. |
 | `click`, `hover`, `type`, `key`, `scroll`, `select` | CDP `Input.*` events at the element (by `ref`, `selector`, `name` or `x`/`y`); `type` uses `Input.insertText`, takes `secret_env`, `clear`, and `format` html/markdown (dispatched as a paste event, no clipboard). `click` and `key` take `hold`. |
 | `drag` | Trusted HTML5 drag-and-drop: `Input.setInterceptDrags`, then `Input.dispatchDragEvent` at the target; a pointer drag when the source is not draggable; `drag_method: "js"` for a synthetic DataTransfer drag. |
-| `wait` | `url` fragment, `load` state, `selector`; every action also takes `wait_for` text. |
+| `wait` | `url` fragment, `load` state (`networkidle`: nothing loading for 0.5 s), `selector`; every action also takes `wait_for` text. |
 | `dialog` | Accept or dismiss a JS `alert`/`confirm`/`prompt` (reported by any action while open). |
 | `upload` | `DOM.setFileInputFiles` on a file input, or intercepts the file chooser a button opens. |
 | `download` | Optionally clicks, then waits for the next download to finish and reports its path. |
 | `evaluate` | Runs JavaScript in the page and returns its JSON value. |
+| `extract` | Structured data: one line per schema.org product (price, currency, availability, SKU/GTIN, brand) from JSON-LD, microdata or product meta tags, then the raw JSON-LD, meta and microdata; lists embedded JSON scripts (`__NEXT_DATA__`, …), which `selector` reads. |
+| `requests` | The tab's network log: documents, XHR, fetch and JSON of the current page (`type` widens it, `filter` narrows by URL), `r<id>` each; `request: "r12"` returns that response's body. |
+
+## Network log and page status
+
+The extension attaches to a tab before `open` and the navigation actions load anything, and enables CDP `Network`, so
+the log holds the page load itself. Per tab it keeps the last 400 requests (redirect hops included, with status, MIME
+type, size and up to 2 KB of a request body) until the tab closes; bodies are read on demand with
+`Network.getResponseBody` while the debugger is attached (it detaches at turn end). `open`, `navigate`, `back`,
+`forward` and `reload` report the main document's `HTTP <status>` and any redirects. A snapshot whose page is a bot
+check (Cloudflare, DataDome, PerimeterX, hCaptcha, reCAPTCHA, Akamai) says so in its header, so it is not read as
+the site. Network idle counts requests still loading, except WebSockets, event streams and requests older than
+10 s (long polls).
 
 ## Profiles
 

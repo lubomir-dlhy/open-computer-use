@@ -65,7 +65,10 @@ Work without bringing apps forward or touching the user's windows:
   `name`), and each action returns only what changed. `type` takes `secret_env` like `type_text`. `drag` does
   real HTML5 drag-and-drop. `wait` waits for `url`, `load` or `selector`; every action takes `wait_for`. A JS
   `alert`/`confirm` is reported; answer it with `{"action":"dialog","accept":true}`. `evaluate` runs JavaScript
-  for reads; do not use it to change the page instead of acting on it. Tabs you open close when your turn
+  for reads; do not use it to change the page instead of acting on it. For prices, stock and other facts, read
+  data before layout: `extract` (structured product data and embedded JSON), `requests` (the page's API calls;
+  `request: "r12"` for a body), `snapshot` with `find`. Navigation results start with `HTTP <status>`; a
+  `Bot check:` header means a challenge page, not the site: wait or ask the user. Tabs you open close when your turn
   ends: if the tab holds the result the user asked for (a submitted form, an opened page), call
   `{"action":"keep"}` before you finish. To work in a tab the user already has open, `tabs` then `claim`.
   Open tabs in the Chrome profile whose account the task belongs to: pass `profile` (the parameter lists the

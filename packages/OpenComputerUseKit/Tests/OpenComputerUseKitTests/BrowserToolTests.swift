@@ -73,4 +73,35 @@ final class BrowserToolTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseToolDispatcher().callTool(
             name: "press_key", arguments: ["app": "missing-test-app", "key": "a", "hold": 30]))
     }
+
+    func testProductSummariesCoverCommonShopShapes() {
+        let jsonld: [[String: Any]] = [
+            ["@type": "Product", "name": "Kettle", "gtin13": "4006381333931", "brand": ["@type": "Brand", "name": "Bosch"],
+             "offers": ["@type": "AggregateOffer", "lowPrice": 39, "highPrice": "54.90", "priceCurrency": "EUR",
+                        "availability": "https://schema.org/InStock"]],
+            ["@type": "ProductGroup", "name": "Tee", "hasVariant": [
+                ["@type": "Product", "name": "Tee S", "sku": "T-S",
+                 "offers": [["price": "19.00", "priceCurrency": "EUR", "availability": "http://schema.org/OutOfStock", "seller": ["name": "Shop A"]],
+                            ["price": "21.00", "priceCurrency": "EUR", "availability": "InStock"]]],
+            ]],
+            ["@type": "BreadcrumbList"],
+        ]
+        XCTAssertEqual(BrowserTool.productSummaries(jsonld: jsonld, microdata: [], meta: [:]), [
+            "Product \"Kettle\", 39–54.90 EUR (InStock), gtin13 4006381333931, brand Bosch",
+            "Product \"Tee\"",
+            "Product \"Tee S\", 19.00 EUR (OutOfStock) seller Shop A; 21.00 EUR (InStock), sku T-S",
+        ])
+        XCTAssertEqual(BrowserTool.productSummaries(jsonld: [], microdata: [
+            ["name": "Lamp", "price": "12.50", "priceCurrency": "USD", "availability": "https://schema.org/LimitedAvailability", "sku": "L1"],
+        ], meta: [:]), ["Product \"Lamp\", 12.50 USD (LimitedAvailability), sku L1"])
+        XCTAssertEqual(BrowserTool.productSummaries(jsonld: [], microdata: [], meta: [
+            "og:title": "Chair", "product:price:amount": "99", "product:price:currency": "CZK", "product:availability": "in stock",
+        ]), ["Product \"Chair\", 99 CZK (in stock)"])
+        XCTAssertEqual(BrowserTool.productSummaries(jsonld: [["@type": "WebPage"]], microdata: [], meta: [:]), [])
+    }
+
+    func testClipSaysHowMuchWasLeftOut() {
+        XCTAssertEqual(BrowserTool.clip("abcdef", 4, hint: "raise max_chars"), "abcd… (2 more chars; raise max_chars)")
+        XCTAssertEqual(BrowserTool.clip("abc", 4, hint: "x"), "abc")
+    }
 }

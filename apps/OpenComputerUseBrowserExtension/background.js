@@ -10,6 +10,10 @@ const DEFAULT_CDP_TIMEOUT_MS = 10_000;
 const MAX_USER_TABS = 500;
 const SESSION_GROUP_TITLE = "OCU";
 const DELIVERABLE_GROUP_TITLE = "OCU ✓";
+const NETWORK_LOG_LIMIT = 400;
+const NETWORK_BODY_TYPES = new Set(["Document", "XHR", "Fetch"]);
+// Streams never finish; a request this old no longer counts as loading (long polls).
+const NETWORK_IDLE_IGNORE_MS = 10_000;
 const FORWARDED_CDP_EVENTS = new Set(["Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Input.dragIntercepted"]);
 
 class JsonRpcPeer {
@@ -171,6 +175,8 @@ class BrowserBackend {
     this.downloadWaiters = new Set();
     this.fileChoosersById = new Map();
     this.fileChooserWaitersByTabId = new Map();
+    this.networkLogs = new Map();
+    chrome.tabs.onRemoved.addListener((tabId) => this.networkLogs.delete(tabId));
     chrome.debugger.onDetach.addListener((source) => {
       if (typeof source.tabId === "number") {
         this.attachedTabs.delete(source.tabId);
@@ -196,8 +202,11 @@ class BrowserBackend {
   async createTab(params) {
     const session = await this.requireSession(params);
     const url = typeof params.url === "string" && params.url ? params.url : "about:blank";
-    const tab = await createBackgroundTab(url);
+    // Attached before the first navigation, so the page load itself is in the network log.
+    const tab = await createBackgroundTab("about:blank");
     await this.ensureSessionGroup(session.sessionId, tab.id, "agent");
+    await this.attachTab(tab.id).catch(() => {});
+    if (url !== "about:blank") await chrome.tabs.update(tab.id, { url });
     return toBrowserTab(tab);
   }
 
@@ -252,15 +261,19 @@ class BrowserBackend {
     const tabId = params.tabId;
     switch (params.command) {
       case "navigate":
+        await this.attachTab(tabId).catch(() => {});
         await chrome.tabs.update(tabId, { url: requireNonEmptyString(params.url, "navigate requires url") });
         break;
       case "back":
+        await this.attachTab(tabId).catch(() => {});
         await chrome.tabs.goBack(tabId);
         break;
       case "forward":
+        await this.attachTab(tabId).catch(() => {});
         await chrome.tabs.goForward(tabId);
         break;
       case "reload":
+        await this.attachTab(tabId).catch(() => {});
         await chrome.tabs.reload(tabId);
         break;
       case "close": {
@@ -486,10 +499,93 @@ class BrowserBackend {
   }
 
   handleCdpEvent(source, method, params) {
-    if (method !== "Page.fileChooserOpened" || typeof source?.tabId !== "number") {
+    if (typeof source?.tabId !== "number") return;
+    if (method.startsWith("Network.") || method === "Page.frameNavigated") {
+      this.recordNetworkEvent(source.tabId, method, params ?? {});
       return;
     }
-    this.fileChooserWaitersByTabId.get(source.tabId)?.(params ?? {});
+    if (method === "Page.fileChooserOpened") this.fileChooserWaitersByTabId.get(source.tabId)?.(params ?? {});
+  }
+
+  networkLogFor(tabId) {
+    let log = this.networkLogs.get(tabId);
+    if (!log) {
+      log = { entries: [], byRequestId: new Map(), nextId: 1, mainFrameId: null, navigation: 0, lastEventAt: Date.now() };
+      this.networkLogs.set(tabId, log);
+    }
+    return log;
+  }
+
+  recordNetworkEvent(tabId, method, params) {
+    const log = this.networkLogFor(tabId);
+    const now = Date.now();
+    log.lastEventAt = now;
+    if (method === "Page.frameNavigated") {
+      if (!params.frame?.parentId) log.mainFrameId = params.frame?.id ?? log.mainFrameId;
+      return;
+    }
+    const entry = log.byRequestId.get(params.requestId);
+    switch (method) {
+      case "Network.requestWillBeSent": {
+        // A redirect reuses the request id: the previous hop ends here.
+        if (entry && params.redirectResponse) {
+          entry.status = params.redirectResponse.status;
+          entry.redirectedTo = params.request?.url;
+          entry.endedAt = now;
+        }
+        const main = params.type === "Document" && (!log.mainFrameId || params.frameId === log.mainFrameId);
+        if (main && !params.redirectResponse) log.navigation += 1;
+        const next = {
+          id: log.nextId++,
+          requestId: params.requestId,
+          url: params.request?.url ?? "",
+          method: params.request?.method ?? "GET",
+          type: params.type ?? "Other",
+          main,
+          navigation: log.navigation,
+          redirectedFrom: entry && params.redirectResponse ? entry.id : undefined,
+          postData: typeof params.request?.postData === "string" ? params.request.postData.slice(0, 2000) : undefined,
+          startedAt: now
+        };
+        log.byRequestId.set(params.requestId, next);
+        log.entries.push(next);
+        if (log.entries.length > NETWORK_LOG_LIMIT) log.entries.splice(0, log.entries.length - NETWORK_LOG_LIMIT);
+        return;
+      }
+      case "Network.responseReceived":
+        if (!entry) return;
+        entry.status = params.response?.status;
+        entry.mimeType = params.response?.mimeType;
+        entry.fromCache = params.response?.fromDiskCache || params.response?.fromServiceWorker || undefined;
+        return;
+      case "Network.loadingFinished":
+        if (!entry) return;
+        entry.size = params.encodedDataLength;
+        entry.endedAt = now;
+        return;
+      case "Network.loadingFailed":
+        if (!entry) return;
+        entry.failed = params.canceled ? "canceled" : (params.blockedReason ?? params.errorText ?? "failed");
+        entry.endedAt = now;
+        return;
+    }
+  }
+
+  // Requests seen in the tab since its debugger attached, newest last.
+  async networkLog(params) {
+    await this.requireSessionTab(params, "networkLog");
+    const log = this.networkLogFor(params.tabId);
+    const after = typeof params.after === "number" ? params.after : 0;
+    const now = Date.now();
+    const loading = log.entries.filter((entry) => entry.endedAt === undefined && entry.type !== "WebSocket" && entry.type !== "EventSource"
+      && now - entry.startedAt < NETWORK_IDLE_IGNORE_MS).length;
+    return {
+      attached: this.attachedTabs.has(params.tabId),
+      navigation: log.navigation,
+      loading,
+      quietMs: now - log.lastEventAt,
+      entries: log.entries.filter((entry) => entry.id > after).map((entry) => ({ ...entry, hasBody: NETWORK_BODY_TYPES.has(entry.type) }))
+    };
   }
 
   waitForFileChooserEvent(tabId) {
@@ -604,6 +700,9 @@ class BrowserBackend {
     // Dialog events need the Page domain; a background tab otherwise reports no focus.
     await chrome.debugger.sendCommand({ tabId }, "Page.enable").catch(() => {});
     await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", { maxTotalBufferSize: 50_000_000, maxResourceBufferSize: 10_000_000 }).catch(() => {});
+    const tree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => null);
+    if (tree?.frameTree?.frame?.id) this.networkLogFor(tabId).mainFrameId = tree.frameTree.frame.id;
   }
 
   async detachMany(tabIds) {
