@@ -2,7 +2,7 @@
 /// lifetime in that document, so a later snapshot can be diffed against an earlier one.
 let browserPageScript = #"""
 (() => {
-  if (window.__ocu && window.__ocu.v === 1) return;
+  if (window.__ocu && window.__ocu.v === 2) return;
   const refs = new Map();
   const ids = new WeakMap();
   let next = 1;
@@ -108,6 +108,38 @@ let browserPageScript = #"""
     const parent = el.parentElement;
     return !parent || getComputedStyle(parent).cursor !== "pointer";
   };
+  // What tells an unnamed or same-named control apart, so the agent need not take a screenshot.
+  const ICON_CLASS = /(?:^|[-_])(?:icon|fa|bi|mdi|ri|lucide|octicon|glyphicon|ti)-(?!fw$|lg$|sm$|xs$|solid$|regular$|light$|brands$)([a-z][a-z0-9-]{1,30})$/i;
+  const generatedID = (id) => /^[:_]|\d{4,}|[0-9a-f]{8,}|[-_][a-z0-9]{6,}$/i.test(id) && !/^[a-z]+(?:[-_][a-z]+)*$/i.test(id);
+  const hintOf = (el, withRow, above = []) => {
+    const parts = [];
+    const icon = el.querySelector?.("svg title")?.textContent
+      || el.querySelector?.("svg[aria-label],[class*=icon][aria-label]")?.getAttribute("aria-label")
+      || el.querySelector?.("use")?.getAttribute("href")?.replace(/^.*#/, "").replace(/^(?:icon|i)[-_]/, "")
+      || [el, ...(el.querySelectorAll?.("svg,i,span") ?? [])].slice(0, 6)
+        .flatMap((node) => [...(node.classList ?? [])]).map((c) => c.match(ICON_CLASS)?.[1]).find(Boolean);
+    if (icon) parts.push("icon " + clean(icon, 30));
+    const src = (el.tagName === "IMG" ? el : el.querySelector?.("img"))?.getAttribute("src");
+    if (src && !src.startsWith("data:")) { const file = src.split(/[?#]/)[0].split("/").pop(); if (file) parts.push("image " + clean(file, 40)); }
+    const testID = el.getAttribute("data-testid") || el.getAttribute("data-test") || el.getAttribute("data-qa");
+    if (testID) parts.push("testid " + clean(testID, 40));
+    else if (el.getAttribute("name")) parts.push("name " + clean(el.getAttribute("name"), 30));
+    else if (el.id && !generatedID(el.id)) parts.push("id " + clean(el.id, 30));
+    if (withRow) {
+      const row = el.parentElement?.closest("tr,li,[role=row],[role=listitem],[role=option],article");
+      const words = [];
+      if (row) {
+        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode() && words.length < 40) if (!el.contains(walker.currentNode)) words.push(walker.currentNode.textContent);
+      }
+      const text = clean(words.join(" "), 50);
+      const squash = (t) => t.replace(/[\s…]+/g, "");
+      // Snapshot text lines just above usually already show the row.
+      const shown = text && above.some((line) => !line.startsWith("[") && squash(text).startsWith(squash(line).slice(0, 20)));
+      if (text && !shown) parts.push("in " + quote(text));
+    }
+    return parts.join(", ");
+  };
   const hasInteractiveInside = (el) => !!el.querySelector?.("a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=option],[role=menuitem],[role=tab]");
 
   function snapshot(maxChars) {
@@ -115,11 +147,14 @@ let browserPageScript = #"""
     let buffer = "";
     let used = 0;
     let truncated = 0;
+    const firstByName = new Map();
+    const withHint = (line, hint) => hint ? `${line} hint=${quote(hint)}` : line;
     const push = (line) => {
-      if (used + line.length > maxChars) { truncated++; return; }
-      if (lines[lines.length - 1] === line) return;
+      if (used + line.length > maxChars) { truncated++; return -1; }
+      if (lines[lines.length - 1] === line) return -1;
       lines.push(line);
       used += line.length + 1;
+      return lines.length - 1;
     };
     const flush = () => {
       const text = clean(buffer, 300);
@@ -131,7 +166,19 @@ let browserPageScript = #"""
       const name = role === "heading" ? clean(el.innerText, 120) : nameOf(input ?? el, role, ownTextOnly) || (input ? clean(el.innerText) : "");
       const state = stateOf(el, role, input);
       if (role === "heading") { push(`[${refOf(el)}] heading ${quote(name)}${state ? " " + state : ""}`); return; }
-      push(`[${refOf(el)}] ${role}${name ? " " + quote(name) : ""}${state ? " " + state : ""}`);
+      const line = `[${refOf(el)}] ${role}${name ? " " + quote(name) : ""}${state ? " " + state : ""}`;
+      const key = role + "\u0000" + name;
+      const first = firstByName.get(key);
+      const index = push(withHint(line, !name || first ? hintOf(el, !!first, lines.slice(-4)) : ""));
+      if (!first) { if (index >= 0) firstByName.set(key, { index, el, line, shared: false }); return; }
+      if (first.shared) return;
+      // The first control with this name learns it is not unique only now.
+      first.shared = true;
+      const updated = withHint(first.line, hintOf(first.el, true, lines.slice(Math.max(0, first.index - 4), first.index)));
+      if (lines[first.index] !== undefined && used + updated.length - lines[first.index].length <= maxChars) {
+        used += updated.length - lines[first.index].length;
+        lines[first.index] = updated;
+      }
     };
     const walk = (node) => {
       if (node.nodeType === 3) { buffer += " " + node.textContent; return; }
@@ -328,7 +375,7 @@ let browserPageScript = #"""
     return `${location.href}|${document.readyState}|${document.getElementsByTagName("*").length}|${document.body?.innerText.length ?? 0}`;
   }
   Object.defineProperty(window, "__ocu", {
-    value: { v: 1, snapshot, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
+    value: { v: 2, snapshot, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
              fileInput: (target) => { const el = resolve(target); return el.tagName === "INPUT" && el.type === "file" ? el : null; } },
     enumerable: false,
     configurable: true

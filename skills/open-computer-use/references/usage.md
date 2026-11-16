@@ -133,6 +133,7 @@ Needs the Open Computer Use Browser extension (`open-computer-use browser-setup`
 - `{"action": "open", "url": "https://…", "profile": "…"}` opens a background tab and returns a snapshot: `[ref] role "name" state` lines plus visible text. Later calls default to that tab (`tab` picks another).
 - Target elements by `ref`, `selector` or `name` (visible text); `x`/`y` are viewport CSS pixels.
 - `click` (`click_count`, `button`, `modifiers`, `hold`, `force`), `hover`, `type` (`text` or `secret_env`, `clear`, `format`), `key` (`Enter`, `cmd+a`, …), `scroll` (`direction`, `amount`), `select` (native `<select>`), `drag` (`to_ref`/`to_selector`/`to_name`/`to_x`+`to_y`; HTML5 drag-and-drop works), `upload` (`files`), `download`, `evaluate` (`expression`).
+- Unnamed or repeated controls carry `hint="icon trash"`, `hint="testid …"` or `hint="in \"row text\""`; use them before reaching for a screenshot.
 - Results are diffs against the last snapshot; a navigation returns the new page. `wait_for` / `wait_timeout` work as in native actions; `wait` also takes `url`, `load` and `selector`.
 - A JS dialog is reported by the next action; answer with `{"action": "dialog", "accept": true}` (`text` for a prompt).
 - Tabs you open close at the end of the turn. `{"action": "keep"}` keeps the current tab (`status: "handoff"` to continue later). `tabs` lists yours and the user's; `claim` takes one of the user's tabs, released at the end of the turn. `show` brings a tab forward only when the user wants to watch.

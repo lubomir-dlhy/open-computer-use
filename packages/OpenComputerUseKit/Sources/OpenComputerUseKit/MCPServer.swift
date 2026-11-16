@@ -166,7 +166,9 @@ public final class StdioMCPServer {
     }
 
     private func encode(_ object: [String: Any]) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
+        // Swift seeds dictionary order per process; unsorted tool schemas would differ
+        // between sessions and miss the client's prompt cache.
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
         guard let text = String(data: data, encoding: .utf8) else {
             throw ComputerUseError.message("Failed to encode JSON-RPC response.")
         }

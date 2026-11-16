@@ -29,6 +29,9 @@ MCP client ── browser tool ── BrowserBridge ──unix socket──▶ o
 - `BrowserTool.swift` / `BrowserPageScript.swift`: actions. A page script (installed once per document) renders a
   snapshot of `[ref] role "name" state` lines plus visible text; refs stay stable for an element's lifetime, so
   actions return a diff (`~` changed, `+` added, `-` removed), the full snapshot after a navigation.
+  A control with no name, or with the same role and name as an earlier one, gets a `hint="…"`: its icon (SVG
+  title, `<use>` id or icon class), image file, `data-testid`, `name` or a hand-written `id`, and for a repeated name
+  the text of its row (`tr`, `li`, `[role=row]`, …) unless that text is already among the four lines above.
 
 ## Actions
 

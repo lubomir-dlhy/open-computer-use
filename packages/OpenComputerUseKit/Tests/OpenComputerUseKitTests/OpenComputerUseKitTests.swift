@@ -654,6 +654,14 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
     }
 
+    func testToolsListBytesDoNotDependOnDictionaryOrder() throws {
+        let server = StdioMCPServer(service: ComputerUseService())
+        let response = try XCTUnwrap(server.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#))
+        XCTAssertTrue(response.hasPrefix(#"{"id":2,"jsonrpc":"2.0","result":{"tools":[{"annotations":"#), response)
+        let schema = try XCTUnwrap(response.range(of: #""inputSchema":{"additionalProperties":false,"properties":{"#))
+        XCTAssertLessThan(try XCTUnwrap(response.range(of: #""description":"#)).lowerBound, schema.lowerBound)
+    }
+
     func testInitializeResponseContainsComputerUseInstructions() throws {
         let server = StdioMCPServer(service: ComputerUseService())
         let response = try XCTUnwrap(

@@ -45,7 +45,7 @@ enum BrowserProfiles {
             }
         }.map { profile in
             var profile = profile
-            profile.note = notes.first { matches(profile, $0.key) }?.value
+            profile.note = notes.keys.sorted().first { matches(profile, $0) }.flatMap { notes[$0] }
             return profile
         }
     }
