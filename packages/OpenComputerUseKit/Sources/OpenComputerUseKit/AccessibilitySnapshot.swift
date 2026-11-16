@@ -15,6 +15,8 @@ final class ElementRecord {
     let rawActions: [String]
     let prettyActions: [String]
     let isSyntheticText: Bool
+    /// What the snapshot showed at this index, checked before any action on it; nil where no check applies.
+    let identity: ElementIdentity?
 
     init(
         index: Int,
@@ -26,7 +28,8 @@ final class ElementRecord {
         value: String? = nil,
         rawActions: [String],
         prettyActions: [String],
-        isSyntheticText: Bool = false
+        isSyntheticText: Bool = false,
+        identity: ElementIdentity? = nil
     ) {
         self.index = index
         self.identifier = identifier
@@ -38,6 +41,7 @@ final class ElementRecord {
         self.rawActions = rawActions
         self.prettyActions = prettyActions
         self.isSyntheticText = isSyntheticText
+        self.identity = identity
     }
 }
 
@@ -100,7 +104,7 @@ let accessibilityTreeMaxDepth = AccessibilityTreeLimits.defaultMaxDepth
 let screenshotResultMaxDimension: CGFloat = 1280
 private let windowVisibilityRecoveryDelay: TimeInterval = 0.7
 private let axWebAreaRole = "AXWebArea"
-// Chrome needs up to ~2s after AXManualAccessibility before the web tree exists.
+// A lazy web engine can need up to ~2 s after the accessibility flags before its tree exists.
 private let webAreaRewalkAttempts = 30
 private let webAreaRewalkInterval: TimeInterval = 0.1
 
@@ -298,7 +302,7 @@ enum SnapshotBuilder {
         )
 
         var renderer = TreeRenderer(context: context)
-        TimingLog.measure("snapshot.tree_walk") { renderer.render(rootElement) }
+        TimingLog.measure("snapshot.tree_walk") { AXSnapshotReadCache.withSnapshot { renderer.render(rootElement) } }
 
         // Pin the window's visible state (WindowServer occlusion notifications
         // off) so covering it or moving it to another Space later does not hide
@@ -314,20 +318,24 @@ enum SnapshotBuilder {
                 for _ in 0..<webAreaRewalkAttempts {
                     Thread.sleep(forTimeInterval: webAreaRewalkInterval)
                     renderer = TreeRenderer(context: context)
-                    renderer.render(rootElement)
+                    AXSnapshotReadCache.withSnapshot { renderer.render(rootElement) }
                     if renderer.hasWebArea {
                         break
                     }
                 }
             } else {
-                occlusionNote = "Note: this window is covered or on another Space, so the app hides its web content and it is not in the tree. Bring the window into view once (covering it afterwards keeps working), or call get_app_state with window_placement=agent_display to park it on the agent's own display."
+                var note = "Note: this window is covered or on another Space, so the app hides its web content and it is not in the tree. Bring the window into view once (covering it afterwards keeps working)."
+                if VirtualDisplayConfig.current.enabled {
+                    note += " Alternatively, call get_app_state with window_placement=agent_display to park it on the agent's own display."
+                }
+                occlusionNote = note
             }
         }
 
         if let menuBar = copyElement(appElement, attribute: kAXMenuBarAttribute),
            !CFEqual(menuBar, rootElement)
         {
-            renderer.render(menuBar)
+            AXSnapshotReadCache.withSnapshot { renderer.render(menuBar) }
         }
 
         var treeLines = renderer.lines
@@ -480,7 +488,7 @@ enum SnapshotBuilder {
     }
 
     private static func isUsableWindowElement(_ element: AXUIElement) -> Bool {
-        stringValue(of: element, attribute: kAXRoleAttribute) == kAXWindowRole as String
+        isSnapshotRootRole(stringValue(of: element, attribute: kAXRoleAttribute))
             && boolValue(of: element, attribute: kAXMinimizedAttribute) != true
     }
 
@@ -545,6 +553,14 @@ enum SnapshotBuilder {
     }
 }
 
+/// A sheet (an open/save panel, a "Leave site?" prompt) is the app's focused
+/// window while it blocks the window under it, so it roots the snapshot itself:
+/// the tree, the screenshot and the input target then all come from the sheet,
+/// also in apps whose own window tree leaves the sheet out (Firefox).
+func isSnapshotRootRole(_ role: String?) -> Bool {
+    role == kAXWindowRole as String || role == kAXSheetRole as String
+}
+
 /// Returns `true` when the app accepts `AXManualAccessibility`, i.e. it builds
 /// its (web) accessibility tree lazily on request. Native AppKit apps report
 /// the attribute as unsupported, which is the app-agnostic signal used instead
@@ -556,6 +572,10 @@ private func enableBestEffortAccessibilityModes(_ appElement: AXUIElement) -> Bo
     // harmlessly fail on apps that do not support them.
     let manual = AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     _ = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    // Chrome builds a fresh page's tree as soon as the app element's role is read right after the flags; otherwise
+    // the page shows about 2 s later, whatever else is read first. Chrome rejects AXManualAccessibility, so the read
+    // can't depend on that write succeeding.
+    _ = stringValue(of: appElement, attribute: kAXRoleAttribute)
     return manual == .success
 }
 
@@ -579,7 +599,7 @@ private struct WindowCapture {
                 let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
                 let layer = info[kCGWindowLayer as String] as? Int,
                 let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDictionary), !bounds.isEmpty
+                let bounds = CGRect(dictionaryRepresentation: boundsDictionary), WindowCaptureGeometry.isValid(bounds)
             else {
                 continue
             }
@@ -609,13 +629,14 @@ private struct WindowCapture {
                 let number = info[kCGWindowNumber as String] as? NSNumber,
                 let layer = info[kCGWindowLayer as String] as? Int,
                 let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDictionary)
+                let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+                WindowCaptureGeometry.isValid(bounds),
+                let area = Int(exactly: (bounds.width * bounds.height).rounded(.towardZero))
             else {
                 return nil
             }
 
             let title = info[kCGWindowName as String] as? String
-            let area = Int(bounds.width * bounds.height)
             return WindowCaptureCandidate(
                 windowID: CGWindowID(number.uint32Value),
                 layer: layer,
@@ -637,13 +658,22 @@ private struct WindowCapture {
     }
 
     /// WindowServer's hardware window capture first (any Space, covered or not,
-    /// ~10-40ms), ScreenCaptureKit when it is unavailable.
+    /// ~10-40ms), ScreenCaptureKit when it is unavailable or when the window is
+    /// partially off-screen or spans displays: the hardware path only yields the
+    /// on-screen part, which would silently shift every screenshot coordinate.
     private static func captureImage(windowID: CGWindowID, bounds: CGRect, config: ImageCaptureConfig) -> CGImage? {
-        if !LockedUseActionScope.requiresScreenCaptureKit,
-           let image = TimingLog.measure("snapshot.capture_hw", { SkyLightSPI.shared.hardwareCaptureWindow(windowID) }) {
-            return image
-        }
-        return TimingLog.measure("snapshot.capture_sck") { captureImageWithScreenCaptureKit(windowID: windowID, bounds: bounds, config: config) }
+        WindowCaptureGeometry.capture(
+            bounds: bounds, displayBounds: WindowCaptureGeometry.activeDisplayBounds(),
+            hardware: {
+                guard !LockedUseActionScope.requiresScreenCaptureKit else { return nil }
+                return TimingLog.measure("snapshot.capture_hw") { SkyLightSPI.shared.hardwareCaptureWindow(windowID) }
+            },
+            fullWindow: {
+                TimingLog.measure("snapshot.capture_sck") {
+                    captureImageWithScreenCaptureKit(windowID: windowID, bounds: bounds, config: config)
+                }
+            }
+        )
     }
 
     private static func captureImageWithScreenCaptureKit(windowID: CGWindowID, bounds: CGRect, config: ImageCaptureConfig) -> CGImage? {
@@ -655,9 +685,12 @@ private struct WindowCapture {
 
             let configuration = SCStreamConfiguration()
             let scaleFactor = bestEffortScaleFactor(for: bounds)
-            let captureSize = window.frame.isEmpty ? bounds.size : window.frame.size
-            configuration.width = max(1, Int(ceil(captureSize.width * scaleFactor)))
-            configuration.height = max(1, Int(ceil(captureSize.height * scaleFactor)))
+            // 出屏窗口的 SCWindow.frame 仍是完整几何，但以 CG bounds 为准可和坐标映射保持同一来源。
+            guard let width = Int(exactly: ceil(bounds.width * scaleFactor)),
+                  let height = Int(exactly: ceil(bounds.height * scaleFactor)),
+                  width > 0, height > 0 else { return nil }
+            configuration.width = width
+            configuration.height = height
             configuration.showsCursor = false
             configuration.scalesToFit = false
             configuration.ignoreShadowsSingleWindow = true
@@ -861,6 +894,21 @@ private struct RenderContext {
     let treeLimits: AccessibilityTreeLimits
 }
 
+// Runs the real renderer against a scoped, injected AX provider. The returned
+// records let semantic fixtures verify the actual numeric action lookup targets.
+func renderAXSemanticFixture(root: AXUIElement, focused: AXUIElement? = nil, limits: AccessibilityTreeLimits = .defaults) -> (lines: [String], records: [Int: ElementRecord]) {
+    var renderer = TreeRenderer(context: RenderContext(windowBounds: .zero, focusedElement: focused,
+        textLimit: .max, treeLimits: limits))
+    renderer.render(root)
+    return (renderer.lines, renderer.records)
+}
+
+private struct TraversalElementKey: Hashable {
+    let element: AXUIElement
+    static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
+    func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
+}
+
 private struct TreeRenderer {
     let context: RenderContext
     var hasWebArea = false
@@ -869,12 +917,75 @@ private struct TreeRenderer {
     var records: [Int: ElementRecord] = [:]
     var identifierIndex: [String: String] = [:]
     var focusedSummary: String?
+    private var selected: Set<TraversalElementKey> = []
+    private var rendered: Set<TraversalElementKey> = []
+    private var plannedChildren: [TraversalElementKey: [AXUIElement]] = [:]
 
     init(context: RenderContext) {
         self.context = context
     }
 
-    mutating func render(_ root: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {
+    mutating func render(_ root: AXUIElement) {
+        let truncated = plan(root)
+        renderSelected(root)
+        if truncated { lines.append("[Accessibility tree truncated: prioritized visible controls; some nodes were omitted.]") }
+    }
+
+    // Discover before rendering: a large early list cannot consume the output budget
+    // before later dialog controls. Render the selected graph in its original order.
+    private mutating func plan(_ root: AXUIElement) -> Bool {
+        struct Work {
+            let node: AXUIElement
+            let depth: Int
+            let inCollection: Bool
+            let viewport: CGRect?
+        }
+        selected = []; plannedChildren = [:]
+        let limit = max(0, context.treeLimits.maxNodeCount - nextIndex)
+        let scanLimit = max(64, min(limit, 2500) * 4)
+        var scanned = 0, truncated = false
+        var queues = Array(repeating: [Work](), count: 5)
+        var offsets = Array(repeating: 0, count: 5)
+        var discovered: Set<TraversalElementKey> = []
+        func enqueue(_ work: Work) {
+            guard work.depth < context.treeLimits.maxDepth, scanned < scanLimit else { truncated = true; return }
+            scanned += 1
+            guard discovered.insert(.init(element: work.node)).inserted else { return }
+            let role = stringValue(of: work.node, attribute: kAXRoleAttribute) ?? ""
+            let frame = resolveLocalFrame(of: work.node, windowBounds: nil)
+            let hidden = frame.map { frame in
+                frame.width > 0 && frame.height > 0 && work.viewport.map { !$0.intersects(frame) } == true
+            } ?? false
+            let control = ["AXButton", "AXCheckBox", "AXRadioButton", "AXTextField", "AXTextArea", "AXComboBox", "AXPopUpButton", "AXMenuButton", "AXSlider"].contains(role)
+                || context.focusedElement.map { CFEqual($0, work.node) } == true
+            let collection = work.inCollection || usesRowsAsPrimaryRole(role) || role == "AXScrollArea"
+            let rank = hidden ? 4 : collection ? (control ? 2 : 3) : control ? 0 : 1
+            queues[rank].append(work)
+        }
+        let rootFrame = resolveLocalFrame(of: root, windowBounds: nil)
+        enqueue(.init(node: root, depth: 0, inCollection: false, viewport: rootFrame))
+        while selected.count < limit, let rank = queues.indices.first(where: { offsets[$0] < queues[$0].count }) {
+            let work = queues[rank][offsets[rank]]; offsets[rank] += 1
+            let key = TraversalElementKey(element: work.node)
+            selected.insert(key)
+            let role = stringValue(of: work.node, attribute: kAXRoleAttribute)
+            let collection = work.inCollection || usesRowsAsPrimaryRole(role) || role == "AXScrollArea"
+            var viewport = work.viewport
+            if role == "AXScrollArea", let frame = resolveLocalFrame(of: work.node, windowBounds: nil), frame.width > 0, frame.height > 0 {
+                viewport = viewport.map { $0.intersection(frame) } ?? frame
+            }
+            let remaining = work.depth + 1 >= context.treeLimits.maxDepth ? 0 : max(0, scanLimit - scanned)
+            let raw = rawChildren(of: work.node, limit: remaining, truncated: &truncated)
+            // Duplicate and skipped entries still cost provider traversal work.
+            scanned += raw.inspected - raw.children.count
+            plannedChildren[key] = raw.children
+            for child in raw.children { enqueue(.init(node: child, depth: work.depth + 1, inCollection: collection, viewport: viewport)) }
+        }
+        return truncated || queues.indices.contains { offsets[$0] < queues[$0].count }
+    }
+
+    private mutating func renderSelected(_ root: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {
+        guard selected.contains(.init(element: root)), rendered.insert(.init(element: root)).inserted else { return }
         guard shouldContinueRendering(nextIndex: nextIndex, depth: depth, limits: context.treeLimits) else {
             return
         }
@@ -949,7 +1060,7 @@ private struct TreeRenderer {
         )
         let linkText = role == "AXLink" ? markdownLinkText(for: root, title: title, label: label, value: value, textLimit: context.textLimit) : nil
         let displayTitle = linkText ?? title
-        let inlineRowSummary = outlineRowSummary(for: root, role: role)
+        let inlineRowSummary = outlineRowSummary(for: root, role: role, selectedChildren: childElements)
         let hidesChildren = shouldSuppressChildren(
             role: role,
             title: displayTitle,
@@ -984,7 +1095,7 @@ private struct TreeRenderer {
             preservesCompactGenericActionTarget: rendersCompactGenericActionTarget
         ) {
             for child in childElements {
-                render(child, depth: depth, ancestors: nextAncestors)
+                renderSelected(child, depth: depth, ancestors: nextAncestors)
             }
             return
         }
@@ -1042,7 +1153,14 @@ private struct TreeRenderer {
             localFrame: localFrame,
             role: role,
             rawActions: actions,
-            prettyActions: prettyActions
+            prettyActions: prettyActions,
+            identity: ElementIdentity(
+                role: stringValue(of: root, attribute: kAXRoleAttribute), subrole: subrole,
+                title: stringValue(of: root, attribute: kAXTitleAttribute),
+                description: stringValue(of: root, attribute: kAXDescriptionAttribute),
+                identifier: stringValue(of: root, attribute: kAXIdentifierAttribute),
+                value: ElementIdentity.valueIsName.contains(role) ? stringValue(of: root, attribute: kAXValueAttribute) : nil
+            )
         )
         records[index] = record
 
@@ -1064,7 +1182,7 @@ private struct TreeRenderer {
         if rendersSummaryAsChildren, let genericTextSummary {
             renderSyntheticText(genericTextSummary, representedBy: root, depth: depth + 1)
             for image in summaryImageChildren {
-                render(image, depth: depth + 1, ancestors: nextAncestors)
+                renderSelected(image, depth: depth + 1, ancestors: nextAncestors)
             }
             return
         }
@@ -1074,7 +1192,7 @@ private struct TreeRenderer {
         }
 
         for child in childElements {
-            render(child, depth: depth + 1, ancestors: nextAncestors)
+            renderSelected(child, depth: depth + 1, ancestors: nextAncestors)
         }
     }
 
@@ -1117,40 +1235,27 @@ private struct TreeRenderer {
     }
 
     private func children(of element: AXUIElement) -> [AXUIElement] {
+        (plannedChildren[.init(element: element)] ?? []).filter { selected.contains(.init(element: $0)) }
+    }
+
+    private func rawChildren(of element: AXUIElement, limit: Int, truncated: inout Bool) -> (children: [AXUIElement], inspected: Int) {
         let role = stringValue(of: element, attribute: kAXRoleAttribute)
         let rows = copyArray(element, attribute: kAXRowsAttribute) ?? []
-        let visibleChildren = copyArray(element, attribute: axVisibleChildrenAttribute) ?? []
-        let attributes = childTraversalAttributes(
-            role: role,
-            hasRows: !rows.isEmpty,
-            hasVisibleChildren: !visibleChildren.isEmpty
-        )
+        let visible = copyArray(element, attribute: axVisibleChildrenAttribute) ?? []
+        let attributes = childTraversalAttributes(role: role, hasRows: !rows.isEmpty, hasVisibleChildren: !visible.isEmpty)
         var children: [AXUIElement] = []
-
+        var inspected = 0
+        var seen: Set<TraversalElementKey> = []
         for attribute in attributes {
-            let sourceValues: [AXUIElement]
-            if attribute == kAXRowsAttribute {
-                sourceValues = rows
-            } else if attribute == axVisibleChildrenAttribute {
-                sourceValues = visibleChildren
-            } else {
-                sourceValues = copyArray(element, attribute: attribute) ?? []
-            }
-
-            let values = attribute == kAXRowsAttribute ? visibleRows(in: sourceValues, parent: element) : sourceValues
-
-            for child in values {
-                if shouldSkipChild(child, of: element) {
-                    continue
-                }
-
-                if !children.contains(where: { CFEqual($0, child) }) {
-                    children.append(child)
-                }
+            let source = attribute == kAXRowsAttribute ? rows : attribute == axVisibleChildrenAttribute ? visible : copyArray(element, attribute: attribute) ?? []
+            for child in source {
+                guard inspected < limit else { truncated = true; return (children, inspected) }
+                inspected += 1
+                guard seen.insert(.init(element: child)).inserted else { continue }
+                if !shouldSkipChild(child, of: element) { children.append(child) }
             }
         }
-
-        return children
+        return (children, inspected)
     }
 
     private func containsActionableLinkDescendant(
@@ -1191,6 +1296,7 @@ private struct TreeRenderer {
 }
 
 func childTraversalAttributes(role: String?, hasRows: Bool, hasVisibleChildren: Bool) -> [String] {
+    if hasVisibleChildren && usesRowsAsPrimaryRole(role) { return [axVisibleChildrenAttribute] }
     var attributes: [String] = []
     if !(hasRows && usesRowsAsPrimaryRole(role)) && !(hasVisibleChildren && usesVisibleChildrenAsPrimaryRole(role)) {
         attributes.append(kAXChildrenAttribute)
@@ -1282,26 +1388,17 @@ private func valueTypeTrait(of element: AXUIElement) -> String? {
 }
 
 private func copyElement(_ element: AXUIElement, attribute: String) -> AXUIElement? {
-    var value: CFTypeRef?
-    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-    guard error == .success, let value else {
-        return nil
-    }
-
+    guard let value = attributeValue(of: element, attribute: attribute),
+          CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return (value as! AXUIElement)
 }
 
 private func copyArray(_ element: AXUIElement, attribute: String) -> [AXUIElement]? {
-    var value: CFTypeRef?
-    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-    guard error == .success, let value else {
-        return nil
-    }
-
-    return value as? [AXUIElement]
+    attributeValue(of: element, attribute: attribute) as? [AXUIElement]
 }
 
 private func copyActions(_ element: AXUIElement) -> [String]? {
+    if let cache = AXSnapshotReadCache.current { return cache.actionNames(element) }
     var actions: CFArray?
     let error = AXUIElementCopyActionNames(element, &actions)
     guard error == .success else {
@@ -1311,7 +1408,19 @@ private func copyActions(_ element: AXUIElement) -> [String]? {
     return actions as? [String]
 }
 
+/// A password field's value is never read. AppKit answers an empty string, which type_text took for the field's text
+/// and replaced the whole password with the typed characters; an app that answers the text in clear would put the
+/// secret into snapshots, query matches and logs.
+func isSecureTextField(subrole: String?) -> Bool {
+    subrole == kAXSecureTextFieldSubrole as String
+}
+
 private func attributeValue(of element: AXUIElement, attribute: String) -> CFTypeRef? {
+    if (attribute == kAXValueAttribute as String || attribute == kAXSelectedTextAttribute as String),
+       isSecureTextField(subrole: attributeValue(of: element, attribute: kAXSubroleAttribute) as? String) {
+        return nil
+    }
+    if let cache = AXSnapshotReadCache.current { return cache.value(element, attribute) }
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
     guard error == .success else {
@@ -1361,6 +1470,7 @@ private func pid(of element: AXUIElement) -> pid_t {
 }
 
 private func isSettable(of element: AXUIElement, attribute: String) -> Bool {
+    if let cache = AXSnapshotReadCache.current { return cache.isSettable(element, attribute) }
     var settable = DarwinBoolean(false)
     let error = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
     return error == .success && settable.boolValue
@@ -1499,7 +1609,7 @@ private func markdownEscapedLinkText(_ text: String) -> String {
         .replacingOccurrences(of: "]", with: "\\]")
 }
 
-private func outlineRowSummary(for element: AXUIElement, role: String) -> String? {
+private func outlineRowSummary(for element: AXUIElement, role: String, selectedChildren: [AXUIElement]) -> String? {
     guard role == kAXOutlineRole as String || role == kAXListRole as String else {
         return nil
     }
@@ -1508,12 +1618,10 @@ private func outlineRowSummary(for element: AXUIElement, role: String) -> String
         return nil
     }
 
-    let visibleRows = visibleRows(in: allRows, parent: element)
-    guard !visibleRows.isEmpty, visibleRows.count < allRows.count else {
-        return nil
-    }
-
-    return "(showing 0-\(visibleRows.count - 1) of \(allRows.count) items)"
+    let rows = Set(allRows.map { TraversalElementKey(element: $0) })
+    let included = selectedChildren.filter { rows.contains(.init(element: $0)) }.count
+    guard included < allRows.count else { return nil }
+    return "(\(included) of \(allRows.count) items included)"
 }
 
 private func formattedValueSegment(for element: AXUIElement, roleText: String, title: String?, value: String?) -> String {
@@ -1652,34 +1760,32 @@ private func displayIdentifierSegment(for element: AXUIElement, role: String, id
 }
 
 private func resolveLocalFrame(of element: AXUIElement, windowBounds: CGRect?) -> CGRect? {
-    var positionValue: CFTypeRef?
-    var sizeValue: CFTypeRef?
-    let positionError = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
-    let sizeError = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
-    guard
-        positionError == .success,
-        sizeError == .success,
-        let positionValue,
-        let sizeValue
-    else {
-        return nil
-    }
+    guard let positionValue = attributeValue(of: element, attribute: kAXPositionAttribute),
+          let sizeValue = attributeValue(of: element, attribute: kAXSizeAttribute),
+          CFGetTypeID(positionValue) == AXValueGetTypeID(),
+          CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
 
     let positionAXValue = positionValue as! AXValue
     let sizeAXValue = sizeValue as! AXValue
     var position = CGPoint.zero
     var size = CGSize.zero
-    guard AXValueGetValue(positionAXValue, .cgPoint, &position), AXValueGetValue(sizeAXValue, .cgSize, &size) else {
+    guard AXValueGetValue(positionAXValue, .cgPoint, &position), AXValueGetValue(sizeAXValue, .cgSize, &size),
+          [position.x, position.y, size.width, size.height].allSatisfy(\.isFinite) else {
+        // AX 偶尔给出 NaN / 无穷的 frame（Contacts 新建卡片的编辑态实测）；当作没有几何信息。
         return nil
     }
 
-    let frame = CGRect(origin: position, size: size)
+    return validatedAXFrame(position: position, size: size, windowBounds: windowBounds)
+}
 
-    guard let windowBounds else {
-        return frame
-    }
-
-    return windowRelativeFrame(elementFrame: frame, windowBounds: windowBounds)
+/// AX geometry is untrusted. Validate again after translating into window coordinates.
+func validatedAXFrame(position: CGPoint, size: CGSize, windowBounds: CGRect? = nil) -> CGRect? {
+    guard [position.x, position.y, size.width, size.height].allSatisfy(\.isFinite),
+          size.width >= 0, size.height >= 0 else { return nil }
+    let global = CGRect(origin: position, size: size)
+    let frame = windowBounds.map { windowRelativeFrame(elementFrame: global, windowBounds: $0) } ?? global
+    guard [frame.origin.x, frame.origin.y, frame.maxX, frame.maxY].allSatisfy(\.isFinite) else { return nil }
+    return frame
 }
 
 func shouldElideNode(
@@ -2288,26 +2394,6 @@ func summaryMarkdownLinkText(text: String, url: String) -> String {
     "[\(markdownEscapedLinkText(text))](\(url))"
 }
 
-private func visibleRows(in rows: [AXUIElement], parent: AXUIElement) -> [AXUIElement] {
-    guard let parentFrame = resolveLocalFrame(of: parent, windowBounds: nil) else {
-        return Array(rows.prefix(20))
-    }
-
-    let visible = rows.filter { row in
-        guard let rowFrame = resolveLocalFrame(of: row, windowBounds: nil) else {
-            return false
-        }
-
-        return rowFrame.intersects(parentFrame)
-    }
-
-    if visible.isEmpty {
-        return Array(rows.prefix(20))
-    }
-
-    return Array(visible.prefix(20))
-}
-
 private func displayIdentifier(_ value: String?) -> String? {
     guard let value, !value.isEmpty, !value.hasPrefix("_NS:") else {
         return nil
@@ -2334,8 +2420,15 @@ private func quoted(_ value: String) -> String {
 
 private extension CGRect {
     var renderedLocalFrame: String {
-        "x=\(Int(origin.x)), y=\(Int(origin.y)), w=\(Int(width)), h=\(Int(height))"
+        "x=\(renderedCoordinate(origin.x)), y=\(renderedCoordinate(origin.y)), "
+            + "w=\(renderedCoordinate(width)), h=\(renderedCoordinate(height))"
     }
+}
+
+/// `Int(Double)` 遇到 NaN / 无穷会直接 trap 并带崩整个 helper；渲染时用 "?" 代替，不信任上游几何。
+func renderedCoordinate(_ value: CGFloat) -> String {
+    guard value.isFinite, abs(value) < CGFloat(Int32.max) else { return "?" }
+    return String(Int(value))
 }
 
 enum TargetedAX {
@@ -2385,6 +2478,8 @@ extension SnapshotBuilder {
         _ = enableBestEffortAccessibilityModes(appElement)
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, 0.1)
+        // This object changes the process-wide timeout, not just one AX reference.
+        defer { AXUIElementSetMessagingTimeout(systemWide, 0) }
         let focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
 
         let rootWindow: AXUIElement
@@ -2425,6 +2520,9 @@ extension SnapshotBuilder {
         }
         let freshContext = try resolveTargetWindow(for: context.app, windowID: context.windowID)
         AXUIElementSetMessagingTimeout(element, 0.1)
+        // Read budgets must not leak into the subsequent action: closing a sheet
+        // can take longer than 50–100 ms even though AXPress succeeds.
+        defer { AXUIElementSetMessagingTimeout(element, 0) }
         guard belongsToWindow(element, window: freshContext.windowElement),
               let bounds = freshContext.windowBounds else {
             throw ComputerUseError.stateUnavailable("Query target no longer belongs to its window; run query again")
@@ -2442,7 +2540,9 @@ extension SnapshotBuilder {
 
     private static func belongsToWindow(_ element: AXUIElement, window: AXUIElement) -> Bool {
         if CFEqual(element, window) { return true }
-        if let owner = copyElement(element, attribute: kAXWindowAttribute) { return CFEqual(owner, window) }
+        // AppKit sheet controls can report the enclosing document as AXWindow.
+        // A different AXWindow is not decisive: verify the bounded parent chain.
+        if let owner = copyElement(element, attribute: kAXWindowAttribute), CFEqual(owner, window) { return true }
         var current = element
         let deadline = ProcessInfo.processInfo.systemUptime + 1
         for _ in 0..<64 {
@@ -2456,9 +2556,11 @@ extension SnapshotBuilder {
     }
 
     private static func windowElement(for windowID: CGWindowID, appElement: AXUIElement) -> AXUIElement? {
-        copyArray(appElement, attribute: kAXWindowsAttribute)?.first {
-            SkyLightSPI.shared.windowID(for: $0) == windowID
-        } ?? SkyLightSPI.shared.remoteWindowElements(pid: pid(of: appElement)).first { $0.windowID == windowID }?.element
+        let isWindow = { SkyLightSPI.shared.windowID(for: $0) == windowID }
+        // AXWindows leaves sheets out; a sheet is found as the focused window.
+        return copyArray(appElement, attribute: kAXWindowsAttribute)?.first(where: isWindow)
+            ?? copyElement(appElement, attribute: kAXFocusedWindowAttribute).flatMap { isWindow($0) ? $0 : nil }
+            ?? SkyLightSPI.shared.remoteWindowElements(pid: pid(of: appElement)).first { $0.windowID == windowID }?.element
     }
 
     // Attributes read for every visited node, in one batched IPC call. Position
@@ -2468,10 +2570,10 @@ extension SnapshotBuilder {
         kAXRoleAttribute as String,
         kAXTitleAttribute as String,
         kAXDescriptionAttribute as String,
-        kAXValueAttribute as String,
         kAXIdentifierAttribute as String,
         kAXPositionAttribute as String,
         kAXSizeAttribute as String,
+        kAXSubroleAttribute as String,
     ]
 
     /// Use one bounded traversal so every app has the same visibility and match rules.
@@ -2561,9 +2663,13 @@ extension SnapshotBuilder {
             }
         }
         func str(_ i: Int) -> String? { (raw[i] as? String).map { String($0.prefix(1001)) } }
+        // Password classification precedes any value request, including batch fallback.
+        let value = isSecureTextField(subrole: str(6)) ? nil
+            : stringValue(of: element, attribute: kAXValueAttribute).map { String($0.prefix(1001)) }
         return NodeScan(
-            role: str(0), title: str(1), description: str(2), value: str(3), identifier: str(4),
-            globalFrame: axFrame(position: raw[5], size: raw[6])
+            role: str(0), title: str(1), description: str(2),
+            value: value, identifier: str(3),
+            globalFrame: axFrame(position: raw[4], size: raw[5])
         )
     }
 
@@ -2581,7 +2687,7 @@ extension SnapshotBuilder {
               extent.width >= 0, extent.height >= 0 else {
             return nil
         }
-        return CGRect(origin: point, size: extent)
+        return validatedAXFrame(position: point, size: extent)
     }
 
     private static func makeRecord(_ element: AXUIElement, scan: NodeScan, windowBounds: CGRect?, index: Int = 0) -> ElementRecord {
@@ -2589,7 +2695,7 @@ extension SnapshotBuilder {
         // Reuse the frame from the batched scan; window-relative when we have bounds.
         let localFrame: CGRect?
         if let frame = scan.globalFrame {
-            localFrame = windowBounds.map { windowRelativeFrame(elementFrame: frame, windowBounds: $0) } ?? frame
+            localFrame = validatedAXFrame(position: frame.origin, size: frame.size, windowBounds: windowBounds)
         } else {
             localFrame = resolveLocalFrame(of: element, windowBounds: windowBounds)
         }

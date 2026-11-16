@@ -45,6 +45,13 @@ public final class ComputerUseToolDispatcher {
     }
 
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        // Calls run on threads whose autorelease pool never drains (the stdio read loop, an
+        // app-agent connection), so without one per call every screenshot's bitmap and
+        // encoded data stayed alive for the whole session.
+        try autoreleasepool { try dispatchTool(name: name, arguments: arguments) }
+    }
+
+    private func dispatchTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         switch name {
         case "list_apps":
             return service.listApps()
@@ -124,7 +131,7 @@ public final class ComputerUseToolDispatcher {
             return try service.setValue(
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
-                value: requireString("value", in: arguments)
+                value: requireString("value", in: arguments, allowEmpty: true)
             )
         case "select_text":
             return try service.selectText(
@@ -154,8 +161,8 @@ public final class ComputerUseToolDispatcher {
         }
     }
 
-    private func requireString(_ key: String, in arguments: [String: Any]) throws -> String {
-        guard let value = arguments[key] as? String, !value.isEmpty else {
+    private func requireString(_ key: String, in arguments: [String: Any], allowEmpty: Bool = false) throws -> String {
+        guard let value = arguments[key] as? String, allowEmpty || !value.isEmpty else {
             throw ComputerUseError.missingArgument(key)
         }
 

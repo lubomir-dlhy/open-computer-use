@@ -278,6 +278,15 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(size.height, 24)
     }
 
+    func testRenderedCoordinateNeverTrapsOnNonFiniteValues() {
+        XCTAssertEqual(renderedCoordinate(12.7), "12")
+        XCTAssertEqual(renderedCoordinate(-3.2), "-3")
+        XCTAssertEqual(renderedCoordinate(.nan), "?")
+        XCTAssertEqual(renderedCoordinate(.infinity), "?")
+        XCTAssertEqual(renderedCoordinate(-.infinity), "?")
+        XCTAssertEqual(renderedCoordinate(CGFloat(Int64.max)), "?")
+    }
+
     func testToolDefinitionCount() {
         XCTAssertEqual(ToolDefinitions.all.count, 11)
         XCTAssertEqual(
@@ -401,6 +410,48 @@ final class OpenComputerUseKitTests: XCTestCase {
                 runningFromLaunchServicesAppInstance: false
             ))
         }
+    }
+
+    func testProxiedCallFilePathsOnlyRewriteFileOptionValues() {
+        let cwd = "/tmp/ocu path/中文"
+        for arguments in [
+            ["snapshot", "--args-file", "--text-limit", "50"],
+            ["call", "list_apps", "--args", "--calls-file", "--sleep", "0"],
+            ["call", "list_apps", "--args-file"],
+            [],
+        ] {
+            XCTAssertEqual(resolvingOpenComputerUseCallFilePaths(arguments, currentDirectory: cwd), arguments)
+        }
+        XCTAssertEqual(
+            resolvingOpenComputerUseCallFilePaths(["call", "list_apps", "--args-file", "args 中文.json"], currentDirectory: cwd),
+            ["call", "list_apps", "--args-file", cwd + "/args 中文.json"]
+        )
+        XCTAssertEqual(
+            resolvingOpenComputerUseCallFilePaths(["call", "list_apps", "--args-file", "--calls-file"], currentDirectory: cwd),
+            ["call", "list_apps", "--args-file", cwd + "/--calls-file"]
+        )
+    }
+
+    func testProxiedCallFilePathsResolveAgainstCallerDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try #"[{"tool":"list_apps"}]"#.write(to: directory.appendingPathComponent("calls.json"), atomically: true, encoding: .utf8)
+
+        let arguments = resolvingOpenComputerUseCallFilePaths(
+            ["call", "--calls-file", "calls.json", "--sleep", "0"],
+            currentDirectory: directory.path
+        )
+        XCTAssertEqual(arguments, ["call", "--calls-file", directory.appendingPathComponent("calls.json").path, "--sleep", "0"])
+        guard case let .call(.sequence(_, callsFile, _)) = try parseOpenComputerUseCLI(arguments: arguments) else {
+            return XCTFail("expected a call sequence")
+        }
+        XCTAssertEqual(try readOpenComputerUseCallSequence(json: nil, file: callsFile).map(\.tool), ["list_apps"])
+
+        XCTAssertEqual(
+            resolvingOpenComputerUseCallFilePaths(["call", "list_apps", "--args-file", "/tmp/args.json"], currentDirectory: directory.path),
+            ["call", "list_apps", "--args-file", "/tmp/args.json"]
+        )
     }
 
     func testAppNameResolutionPrefersRegularAppsAndDisplayNames() {
@@ -646,7 +697,7 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testInitializeResponseContainsToolsCapability() throws {
         let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.2"},"capabilities":{}}}"#)
+        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.4"},"capabilities":{}}}"#)
         XCTAssertNotNil(response)
         XCTAssertTrue(response!.contains(#""name":"open-computer-use""#))
         XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
@@ -655,7 +706,7 @@ final class OpenComputerUseKitTests: XCTestCase {
     func testInitializeResponseContainsComputerUseInstructions() throws {
         let server = StdioMCPServer(service: ComputerUseService())
         let response = try XCTUnwrap(
-            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.2"},"capabilities":{}}}"#)
+            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"1.1.4"},"capabilities":{}}}"#)
         )
         let data = try XCTUnwrap(response.data(using: .utf8))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -696,6 +747,68 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(decodeProcessAncestry(encodeProcessAncestry([12, 3, 1])), [12, 3, 1])
         XCTAssertEqual(processAncestry().first, getpid())
         XCTAssertEqual(processAncestry().last, 1)
+    }
+
+    func testMCPNotificationsAreNeverAnswered() {
+        let server = StdioMCPServer(service: ComputerUseService(), backgroundStateReset: { _ in }, turnStateReset: { _ in })
+        for method in ["notifications/cancelled", "notifications/initialized", "notifications/roots/list_changed", "tools/call"] {
+            XCTAssertNil(server.handle(line: #"{"jsonrpc":"2.0","method":"\#(method)","params":{"requestId":1}}"#), method)
+        }
+    }
+
+    func testMCPCancelSkipsAWaitingRequestAndDropsTheRunningOnesAnswer() {
+        final class Lines: @unchecked Sendable {
+            var rest = [
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#,
+                #"{"jsonrpc":"2.0","id":"1","method":"tools/call"}"#,
+                #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"1"}}"#,
+                #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+                #"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+            ]
+            let ended = DispatchSemaphore(value: 0)
+            let started = DispatchSemaphore(value: 0)
+            func next() -> String? {
+                if rest.count == 4 { _ = started.wait(timeout: .now() + 5) }
+                if rest.isEmpty { ended.signal(); return nil }
+                return rest.removeFirst()
+            }
+        }
+        let lines = Lines()
+        let requests = MCPStdinRequests(readLine: { lines.next() })
+        XCTAssertEqual(requests.next()?.line.contains(#""id":1"#), true)
+        lines.started.signal()
+        // Every line is read while request 1 runs: "1" is cancelled before it starts, 1 while it runs.
+        XCTAssertEqual(lines.ended.wait(timeout: .now() + 5), .success)
+        XCTAssertFalse(requests.finish())
+        XCTAssertEqual(requests.next()?.line.contains("ping"), true)
+        XCTAssertTrue(requests.finish())
+        XCTAssertNil(requests.next())
+    }
+
+    func testMCPCancellationIgnoresInitializeAndMalformedNotifications() {
+        final class Lines: @unchecked Sendable {
+            var rest = [
+                #"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#,
+                #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":0}}"#,
+                #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+                #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":true}}"#,
+                #"{"method":"notifications/cancelled","params":{"requestId":1}}"#,
+                #"{"jsonrpc":"2.0","id":2,"method":"notifications/cancelled","params":{"requestId":1}}"#,
+            ]
+            let ended = DispatchSemaphore(value: 0)
+            func next() -> String? {
+                if rest.isEmpty { ended.signal(); return nil }
+                return rest.removeFirst()
+            }
+        }
+        let lines = Lines()
+        let requests = MCPStdinRequests(readLine: { lines.next() })
+        XCTAssertEqual(lines.ended.wait(timeout: .now() + 5), .success)
+        for method in ["initialize", "ping", "notifications/cancelled"] {
+            XCTAssertTrue(requests.next()?.line.contains(method) == true)
+            XCTAssertTrue(requests.finish())
+        }
+        XCTAssertNil(requests.next())
     }
 
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
@@ -930,6 +1043,41 @@ final class OpenComputerUseKitTests: XCTestCase {
         )
     }
 
+    func testCoordinateClickDescendantMustContainThePoint() {
+        // A blank spot in a 560x372 window: the window is the best record, so its descendants get scanned.
+        let blankSpot = CGPoint(x: 400, y: 250)
+        let window = CGRect(x: 0, y: 0, width: 560, height: 372)
+        let closeButton = CGRect(x: 8, y: 8, width: 16, height: 16)
+        let zeroSizeButton = CGRect(x: 400, y: 250, width: 0, height: 0)
+        let buttonUnderPoint = CGRect(x: 380, y: 236, width: 80, height: 28)
+
+        XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: closeButton, clickPoint: blankSpot, targetFrame: window))
+        XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: zeroSizeButton, clickPoint: blankSpot, targetFrame: window))
+        XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: nil, clickPoint: blankSpot, targetFrame: window))
+        XCTAssertTrue(isDescendantClickCandidateAtTarget(candidateFrame: buttonUnderPoint, clickPoint: blankSpot, targetFrame: window))
+    }
+
+    func testDescendantClickRejectsDegenerateFrames() {
+        let target = CGRect(x: 0, y: 0, width: 500, height: 500)
+        for frame in [CGRect(x: 10, y: 10, width: 0, height: 20),
+                      CGRect(x: 10, y: 10, width: 20, height: 0), CGRect.infinite, CGRect.null] {
+            XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: frame, clickPoint: nil, targetFrame: target))
+            XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: frame, clickPoint: CGPoint(x: 10, y: 10), targetFrame: target))
+        }
+    }
+
+    func testElementClickDescendantMustOverlapTheElement() {
+        let card = CGRect(x: 40, y: 120, width: 300, height: 120)
+
+        XCTAssertTrue(
+            isDescendantClickCandidateAtTarget(candidateFrame: CGRect(x: 52, y: 128, width: 120, height: 20), clickPoint: nil, targetFrame: card)
+        )
+        XCTAssertFalse(
+            isDescendantClickCandidateAtTarget(candidateFrame: CGRect(x: 8, y: 8, width: 16, height: 16), clickPoint: nil, targetFrame: card)
+        )
+        XCTAssertFalse(isDescendantClickCandidateAtTarget(candidateFrame: nil, clickPoint: nil, targetFrame: card))
+    }
+
     func testContainingRowActionAcceptsTightClickableAncestor() {
         XCTAssertTrue(
             isLikelyContainingRowActionFrame(
@@ -1014,6 +1162,39 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testActivationOnlyClickFallbackKeepsWindowRaisePath() {
         XCTAssertTrue(canUseActivationOnlyClickFallback(role: kAXWindowRole as String))
+    }
+
+    func testActivationOnlyClickFallbackKeepsSheetRaisePath() {
+        XCTAssertTrue(canUseActivationOnlyClickFallback(role: kAXSheetRole as String))
+        XCTAssertFalse(canUseActivationOnlyClickFallback(role: kAXGroupRole as String))
+        XCTAssertFalse(canUseActivationOnlyClickFallback(role: nil))
+    }
+
+    func testSnapshotRootsAtFocusedSheet() {
+        XCTAssertTrue(isSnapshotRootRole(kAXWindowRole as String))
+        XCTAssertTrue(isSnapshotRootRole(kAXSheetRole as String))
+        XCTAssertFalse(isSnapshotRootRole(kAXGroupRole as String))
+        XCTAssertFalse(isSnapshotRootRole(nil))
+    }
+
+    func testTypeTextReplacementPreservesUTF16SelectionAndCaret() throws {
+        let replaced = try XCTUnwrap(typedTextReplacement(value: "中🙂文e\u{301}", selection: CFRange(location: 1, length: 2), text: "新🚀"))
+        XCTAssertEqual(replaced.value, "中新🚀文e\u{301}")
+        XCTAssertEqual(replaced.caret, 4)
+        XCTAssertEqual(typedTextReplacement(value: "e\u{301}", selection: CFRange(location: 1, length: 1), text: "X")?.value, "eX")
+        XCTAssertEqual(typedTextReplacement(value: "  ", selection: CFRange(location: 0, length: 0), text: "X")?.value, "X  ")
+        XCTAssertEqual(typedTextReplacement(value: "abc", selection: CFRange(location: 1, length: 0), text: "X")?.value, "aXbc")
+        XCTAssertEqual(typedTextReplacement(value: "abc", selection: CFRange(location: 3, length: 0), text: "X")?.caret, 4)
+        XCTAssertEqual(typedTextReplacement(value: "abc", selection: CFRange(location: 0, length: 3), text: "X")?.value, "X")
+        XCTAssertEqual(typedTextReplacement(value: "", selection: CFRange(location: 0, length: 0), text: "X")?.value, "X")
+    }
+
+    func testTypeTextReplacementRejectsInvalidSelection() {
+        for range in [CFRange(location: -1, length: 0), CFRange(location: 4, length: 0),
+                      CFRange(location: 2, length: 2), CFRange(location: 0, length: -1),
+                      CFRange(location: 1, length: Int.max), CFRange(location: 1, length: 1)] {
+            XCTAssertNil(typedTextReplacement(value: "🙂x", selection: range, text: "X"))
+        }
     }
 
     func testKeyboardTextFallbackRejectsPlainWebArea() {
@@ -1560,6 +1741,49 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(AppSafetyPolicy.isBlocked(bundleIdentifier: "me.proton.pass.electron"))
     }
 
+    func testAdaptiveCursorTempoSpeedsUpInBurstsAndRecoversWhenIdle() {
+        var tempo = adaptiveCursorTempo(previous: 1, gap: .infinity, floor: 0.15)
+        XCTAssertEqual(tempo, 1, "first action after idle runs at full length")
+
+        var burst: [Double] = []
+        for _ in 0..<10 {
+            tempo = adaptiveCursorTempo(previous: tempo, gap: 0.1, floor: 0.15)
+            burst.append(tempo)
+        }
+        XCTAssertEqual(burst, burst.sorted(by: >).map { max($0, 0.15) }, "each back-to-back action is no slower than the last")
+        XCTAssertLessThan(burst[0], 1)
+        XCTAssertEqual(burst.last, 0.15, "a burst bottoms out at the floor")
+
+        XCTAssertEqual(adaptiveCursorTempo(previous: tempo, gap: 2, floor: 0.15), 1, "a relaxed gap restores full length")
+        XCTAssertEqual(adaptiveCursorTempo(previous: 1, gap: 0, floor: 1), 1, "floor 1 turns the speed-up off")
+    }
+
+    func testVisualCursorActionsFromAToolThreadPlayInOrderWithoutBlockingIt() {
+        nonisolated(unsafe) var played: [String] = []
+        nonisolated(unsafe) var callerBlockedMs = Double.infinity
+        let drained = expectation(description: "cursor queue drained")
+
+        Thread.detachNewThread {
+            let start = TimingLog.now()
+            VisualCursorSupport.performOnMain {
+                played.append("first start")
+                // Animations pump the run loop; the next action must not start inside one.
+                let end = Date().addingTimeInterval(0.2)
+                while Date() < end {
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(1 / 120))
+                }
+                played.append("first end")
+            }
+            VisualCursorSupport.performOnMain { played.append("second") }
+            callerBlockedMs = (TimingLog.now() - start) * 1000
+            VisualCursorSupport.performOnMain { drained.fulfill() }
+        }
+        wait(for: [drained], timeout: 5)
+
+        XCTAssertEqual(played, ["first start", "first end", "second"])
+        XCTAssertLessThan(callerBlockedMs, 100, "the tool thread must not wait for the animation")
+    }
+
     func testVisualCursorEnvFlagDefaultsToEnabled() {
         XCTAssertTrue(visualCursorEnabled(environment: [:]))
         XCTAssertTrue(visualCursorEnabled(environment: ["OPEN_COMPUTER_USE_VISUAL_CURSOR": "1"]))
@@ -1987,7 +2211,7 @@ final class OpenComputerUseKitTests: XCTestCase {
             CGSize(width: 2128, height: 1410)
         )
         for name in ["get_app_state"] {
-            let tool = ToolDefinitions.all.first { $0.name == name }
+            let tool = ToolDefinitions.configured(virtualDisplayEnabled: true).first { $0.name == name }
             let properties = tool?.inputSchema["properties"] as? [String: Any]
             XCTAssertEqual((properties?["window_placement"] as? [String: Any])?["enum"] as? [String], ["keep", "agent_display", "restore"])
         }
@@ -2014,6 +2238,44 @@ final class OpenComputerUseKitTests: XCTestCase {
         let original = CGPoint(x: 200, y: 300)
         XCTAssertTrue(AgentDisplay.isRestored(frame: CGRect(x: 200.5, y: 299.5, width: 600, height: 420), to: original))
         XCTAssertFalse(AgentDisplay.isRestored(frame: CGRect(x: 202, y: 300, width: 600, height: 420), to: original))
+    }
+
+    func testAgentDisplayGoesPastTheRightmostUserDisplayOnlyWhenTheirsMoved() {
+        let builtIn = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let external = CGRect(x: 1512, y: -200, width: 2560, height: 1440)
+        // macOS put the agent display right of the built-in and pushed the external one past it.
+        let pushed = external.offsetBy(dx: 1920, dy: 0)
+        XCTAssertEqual(agentDisplayOrigin(displaysBefore: [builtIn, external], displaysNow: [builtIn, pushed]), CGPoint(x: 4072, y: -200))
+        // The rightmost display is the one with the rightmost edge.
+        let left = CGRect(x: -2560, y: 0, width: 2560, height: 1440)
+        XCTAssertEqual(agentDisplayOrigin(displaysBefore: [left, builtIn], displaysNow: [left.offsetBy(dx: 0, dy: 100), builtIn]), CGPoint(x: 1512, y: 0))
+        // Nothing moved, as with a single display: the arrangement is left alone.
+        XCTAssertNil(agentDisplayOrigin(displaysBefore: [builtIn], displaysNow: [builtIn]))
+        XCTAssertNil(agentDisplayOrigin(displaysBefore: [builtIn, external], displaysNow: [builtIn, external]))
+        XCTAssertNil(agentDisplayOrigin(displaysBefore: [], displaysNow: []))
+    }
+
+    func testWindowsMacOSMovesOntoANewAgentDisplayGoBackWhereTheyWere() {
+        let display = CGRect(x: 1512, y: 0, width: 1920, height: 1080)
+        let builtIn = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let before: [CGWindowID: CGRect] = [
+            1: CGRect(x: 300, y: 268, width: 360, height: 232),
+            2: CGRect(x: 720, y: 268, width: 360, height: 232),
+            3: CGRect(x: 1400, y: 100, width: 400, height: 300),
+            4: CGRect(x: 100, y: 100, width: 200, height: 200),
+            5: CGRect(x: -1272, y: 268, width: 360, height: 232),
+            6: CGRect(x: 1400, y: 500, width: 400, height: 300),
+        ]
+        let now: [CGWindowID: CGRect] = [
+            1: CGRect(x: 1552, y: 40, width: 360, height: 232), // remembered on the agent display
+            2: before[2]!, // stayed
+            3: CGRect(x: 1552, y: 40, width: 400, height: 300), // hung past the edge, where macOS leaves a window it took off the last agent display: pulled onto the built-in
+            // 4 closed meanwhile
+            5: CGRect(x: 1552, y: 40, width: 360, height: 232), // read mid Space switch: no place to return to
+            6: before[6]!, // reaches into the display's area but was not moved
+        ]
+        XCTAssertEqual(windowsMovedOntoAgentDisplay(display, userDisplays: [builtIn], before: before, now: now), [1: CGPoint(x: 300, y: 268), 3: CGPoint(x: 1112, y: 100)])
+        XCTAssertEqual(windowsMovedOntoAgentDisplay(display, userDisplays: [builtIn], before: before, now: before), [:])
     }
 
     func testOcclusionKeepAliveRestoresPriorStateAndCanRetryFailures() {
@@ -2140,6 +2402,79 @@ final class OpenComputerUseKitTests: XCTestCase {
                 "AXUIElementIsAttributeSettable(AXValue) failed with -25205"
             )
         }
+    }
+
+    func testClickSequenceNeverFallsBackAfterPartialDelivery() throws {
+        for outcomes: [AXError] in [[.success, .actionUnsupported], [.success, .cannotComplete], [.cannotComplete]] {
+            var calls = 0
+            XCTAssertThrowsError(try performClickActionSequence(action: "AXPress", repeatCount: 3, send: {
+                defer { calls += 1 }
+                return outcomes[calls]
+            }, pause: {}))
+            XCTAssertEqual(calls, outcomes.count)
+        }
+        var calls = 0
+        XCTAssertFalse(try performClickActionSequence(action: "AXPress", repeatCount: 2, send: {
+            calls += 1; return .actionUnsupported
+        }, pause: {}))
+        XCTAssertEqual(calls, 1)
+        calls = 0
+        XCTAssertTrue(try performClickActionSequence(action: "AXPress", repeatCount: 2, send: {
+            calls += 1; return .success
+        }, pause: {}))
+        XCTAssertEqual(calls, 2)
+        calls = 0
+        XCTAssertTrue(try performClickActionSequence(action: "AXOpen", repeatCount: 2, send: {
+            calls += 1; return .attributeUnsupported
+        }, pause: {}))
+        XCTAssertEqual(calls, 1, "Legacy AXOpen handling must not open twice")
+    }
+
+    func testClickChainTriesAnotherWayOnlyWhenTheAppRanNothing() throws {
+        func ran(_ result: AXError, _ action: String = kAXPressAction) -> String {
+            do { return try clickActionRan(result, action: action) ? "ran" : "refused" } catch { return "stop" }
+        }
+        func set(_ result: AXError) -> String {
+            do { return try clickAttributeWasSet(result, attribute: kAXSelectedChildrenAttribute) ? "set" : "refused" } catch { return "stop" }
+        }
+
+        XCTAssertEqual(ran(.success), "ran")
+        for refused: AXError in [.actionUnsupported, .illegalArgument, .notImplemented, .invalidUIElement] {
+            XCTAssertEqual(ran(refused), "refused", "\(refused.rawValue)")
+        }
+        // An app busy past the AX timeout answers cannotComplete while the press runs.
+        for mayHaveActed: AXError in [.failure, .cannotComplete, .attributeUnsupported, .noValue, .apiDisabled] {
+            XCTAssertEqual(ran(mayHaveActed), "stop", "\(mayHaveActed.rawValue)")
+        }
+        XCTAssertEqual(ran(.attributeUnsupported, "AXOpen"), "ran")
+
+        XCTAssertEqual(set(.success), "set")
+        for refused: AXError in [.attributeUnsupported, .actionUnsupported, .illegalArgument, .noValue, .notImplemented, .invalidUIElement] {
+            XCTAssertEqual(set(refused), "refused", "\(refused.rawValue)")
+        }
+        for mayHaveApplied: AXError in [.failure, .cannotComplete] {
+            XCTAssertEqual(set(mayHaveApplied), "stop", "\(mayHaveApplied.rawValue)")
+        }
+
+        XCTAssertThrowsError(try clickActionRan(.cannotComplete, action: kAXPressAction)) { error in
+            XCTAssertEqual(
+                (error as? ComputerUseError)?.errorDescription,
+                "click: AXPress went out and the app did not answer in time; it may have acted, so no other click method was tried. Read the app state before retrying; a repeat could act twice."
+            )
+        }
+    }
+
+    func testPressOnADisabledControlIsRefusedBeforeInput() {
+        XCTAssertEqual(
+            disabledControlRefusal(enabled: false, role: kAXButtonRole as String, elementIndex: "3"),
+            "element 3 is disabled, so nothing was sent. Wait for it to be enabled, or act on another element."
+        )
+        XCTAssertNil(disabledControlRefusal(enabled: true, role: kAXButtonRole as String, elementIndex: "3"))
+        // A window or group without AXEnabled is not refused.
+        XCTAssertNil(disabledControlRefusal(enabled: nil, role: kAXWindowRole as String, elementIndex: "0"))
+        // A closed menu reports its items as they were when it last opened.
+        XCTAssertNil(disabledControlRefusal(enabled: false, role: kAXMenuItemRole as String, elementIndex: "9"))
+        XCTAssertNil(disabledControlRefusal(enabled: false, role: kAXMenuBarItemRole as String, elementIndex: "8"))
     }
 
     func testMakeVisualCursorTargetUsesWindowRelativeElementCenter() {
@@ -2315,7 +2650,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(selected?.windowID, main.windowID)
     }
 
-    func testListTraversalPrefersVisibleChildrenAndReadsContents() {
+    func testListTraversalDoesNotReintroduceFullContentsAlongsideVisibleChildren() {
         let attributes = childTraversalAttributes(
             role: kAXListRole as String,
             hasRows: false,
@@ -2323,7 +2658,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         )
 
         XCTAssertFalse(attributes.contains(kAXChildrenAttribute))
-        XCTAssertTrue(attributes.contains("AXContents"))
+        XCTAssertFalse(attributes.contains("AXContents"))
         XCTAssertTrue(attributes.contains("AXVisibleChildren"))
     }
 

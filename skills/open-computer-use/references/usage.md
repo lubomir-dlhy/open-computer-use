@@ -121,6 +121,13 @@ open-computer-use call get_app_state --args '{"app":"TextEdit"}'
 open-computer-use call set_value --args '{"app":"TextEdit","element_index":"1","value":"Draft"}'
 ```
 
+`set_value` verifies the actual value on macOS, Windows and Linux, including when
+full action read-back is disabled. Text is exact: whitespace, case and leading
+zeros matter; `""` clears the field. Numeric/boolean comparison is used only for
+native attributes of that type. Verification polls for up to 0.6 seconds without
+repeating the write. If it fails, observe the control before deciding to retry:
+the write may already have changed it.
+
 Use `--calls` for short action sequences that need to reuse the same process state:
 
 ```sh
@@ -242,6 +249,15 @@ open-computer-use call --calls '[
 ]'
 ```
 
+Virtual displays are disabled by default. The host must explicitly set
+`virtualDisplay.enabled=true` with `ocu config`, or
+`OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED=true`, before using the examples above.
+While disabled, MCP omits `window_placement`, JS guidance omits `windowPlacement`,
+and stale `agent_display` calls fail before creating a display. The agent must not
+enable this setting on the user's behalf without their request: it adds a system
+monitor and can change the user's display arrangement. Existing `restore` and
+turn/connection cleanup remain available when disabled.
+
 `agent_display` moves the window's frame onto a virtual display the user never sees (macOS only): the app renders it, exposes its full tree and accepts `sky_click` / `sky_key`, while the user's Space, focus and pointer stay untouched. The window is gone from the user's desktop until `restore`, the assistant turn ends, the MCP/REPL connection closes, or the runtime exits, so treat it as a deliberate, temporary step. `restore` restores every window parked by the runtime for that app. Keep park/action/restore calls in one `js`, REPL, MCP, or `call --calls` session; a one-shot CLI connection restores its background state when it closes. `sky_click` and `sky_key` accept covered and other-Space windows.
 
 Apps stop listing a window in `AXWindows` once it is on another Space. On macOS, `query` with a `window_id` (and `get_app_state` when the app reports no usable focused window) still finds such a window if the app ever exposed it to accessibility, by addressing its elements directly. A window that has never been on the user's current Space since the app launched has no accessibility element yet and stays unreachable; ask the user to show it once.
@@ -308,6 +324,14 @@ released when the cursor is cleared or its idle timeout expires.
 
 This follows the window's position, not layout changes inside it. Refresh app state after a layout change
 before choosing another target. Input delivery continues to use the existing action paths.
+
+The tool call does not wait for the cursor animation: the action returns while the cursor finishes its
+travel and click feedback. Back-to-back actions play faster, down to 15% of the normal length
+(`OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR`; a finite positive number, capped at `1`, which turns this off; invalid values use `0.15`), and return to normal after 2 s without
+actions. Window screenshots never include the cursor. A one-shot `open-computer-use call` draws no
+cursor: it would disappear when the process exits. The MCP server and the app agent draw it.
+Turn end or session cleanup cancels unfinished and queued cursor animations; old animations cannot
+show the cursor again after cleanup.
 
 ## Platform Notes
 

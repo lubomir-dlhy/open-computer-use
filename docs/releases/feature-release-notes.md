@@ -1,9 +1,56 @@
 # 功能发布记录
 
+## 2026-11
+
+| 日期 | 功能域 | 用户价值 | 变更摘要 |
+| --- | --- | --- | --- |
+| 2026-11-16 | macOS 应用列表提速 | 更快返回应用列表，保留当前使用日期与次数。 | 去掉 Spotlight 文件名通配符；每个结果一次读取当前属性，日期过滤后才读 Info.plist，避免查询缓存陈旧。多副本选最新有效记录，附真实全扫描对照。 |
+| 2026-11-08 | macOS Chrome 网页树 | 新打开的 Chrome 页面第一次 get_app_state 就带网页内容，从约 2.1 s 降到约 0.15 s。 | 写入无障碍 flag 后立即读 app 元素的 AXRole，Chrome 随即建树；附 opt-in 独立 Chrome 实测。 |
+| 2026-11-16 | 三平台 MCP 通知与取消 | 通知不再收到多余回复；取消排队请求会阻止执行，运行中的动作完成一次但不回复，不保证撤销。 | 独立读取通知、串行执行请求；保护初始化，忽略无效取消。macOS 直连与 app-agent 代理、Windows/Linux stdio 行为统一。 |
+| 2026-11-08 | Windows app 与窗口解析 | 计算器、设置等 UWP app 可以按自己的进程名或标题找到；弹出“是否保存”这类模态对话框时，快照和动作落在对话框上。 | 用 `EnumWindows` 的可见无 owner 顶层窗口代替 `Process.MainWindowHandle`，UWP 框架窗口归到其 CoreWindow 进程；先按 pid、进程名，再按标题匹配；主窗口被禁用时以其拥有的已启用对话框为根；`list_apps` 同步。补 `windows-app-resolution.test.ps1` 并接入 Windows CI。 |
+| 2026-11-08 | Windows 管理员窗口输入 | 目标 app 以管理员身份运行时，动作明确报错并说明原因，不再报成功却什么也没发生。 | 动作前比较目标进程与 runtime 的完整性级别，目标更高则在发送前拒绝；读不到级别时也拒绝输入，`get_app_state` 不变。补 `windows-elevated-target.test.ps1` 并接入 Windows CI。 |
+| 2026-11-08 | macOS 禁用控件 | 点击或对禁用控件执行动作时明确报错，不再报告一个什么都没发生的成功。 | click / perform_secondary_action 在输入前读当前 AXEnabled，为 false 时拒绝；菜单项放行。 |
+| 2026-11-08 | Windows 状态类动作验证 | 复选框、单选按钮、列表项、展开 / 折叠被控件忽略时不再误报成功；滚动不会因为中途被拒绝而多滚一遍。 | Toggle / Select / Expand / Collapse 发送一次后回读状态（0.6 秒），失败提示先观察再重试；ScrollPattern 调用抛错后停止，不再回退滚轮。补 `windows-pattern-readback.test.ps1` 并接入 Windows CI。见 [说明](../set-value-verification.md)。 |
+| 2026-11-08 | Windows 无响应窗口 | app 卡住时约 2 s 内明确报告“无响应”，不再每次调用等满 30 s 后返回笼统的超时。 | UI Automation 读取和动作前用 `IsHungAppWindow` 与 `SendMessageTimeout(WM_NULL)` 探测两次；动作在发送前拒绝，避免输入在 app 恢复后才落下。补 `windows-hung-window.test.ps1` 并接入 Windows CI。 |
+| 2026-11-07 | Windows 控制台窗口 | MCP 服务没有控制台时，每次 Windows 工具调用不再弹出 PowerShell 控制台窗口并抢走前台焦点。 | `powershell.exe` 以 `CREATE_NO_WINDOW` 启动，标准输出管道和 JSON 协议不变；非 Windows 构建为空操作。 |
+| 2026-11-08 | Windows 动作结果 | 点击等动作已经送达、只是之后读不到窗口时（例如窗口被关闭），不再报成失败，避免模型重试造成重复动作。 | 动作后的快照单独捕获错误，返回非错误结果并说明读取失败原因，同时作废旧索引；动作超时提示可能已送达。补 `windows-action-observation.test.ps1`（直接运行生产 dispatch）与 Go 回归，并接入 Windows CI。 |
+| 2026-11-08 | Windows 键盘输入目标 | 后台窗口里 `press_key` 送到有焦点的控件，`type_text` 写进有焦点的文本框而不是第一个；`ctrl+a` 不再被当成 `a` 输入。 | auto 方式按 `GetGUIThreadInfo` 的焦点控件投递，检查投递结果；组合键拒绝并提示 `key_method=global`；`type_text` 只读焦点框拒绝，焦点未知且有多个文本框时拒绝。补 `windows-keyboard-focus.test.ps1` 并接入 Windows CI。 |
+| 2026-11-08 | Windows 元素重新定位 | 控件重建后，点击、设值等动作不再落到另一个同名控件（同名按钮、共用 AutomationId 的列表行）。 | RuntimeId、类型、AutomationId 和完整名称摘要必须一致，失效或变化要求重新观察，不按名称猜替代目标；展示截断不影响身份比较。补 `windows-element-resolution.test.ps1` 并接入 Windows CI。 |
+| 2026-11-08 | macOS 元素序号核对 | 快照之后控件被 app 复用或改名时，不会按到另一个控件。 | 动作前核对序号对应元素的 role / 名称 / identifier；身份变化、失效或无法读取时要求重新观察，不自动寻找同名替代控件。 |
+| 2026-11-08 | Linux 只读字段 | set_value 不再改写用户无法编辑的字段。 | 写入前按 `READ_ONLY` / `EDITABLE` 拒绝只读字段，什么都不写；修复前 Qt 6 只读 `QLineEdit` 被改写并返回成功，GTK 3 等待 0.6 秒后报告“可能已改变”。见 [写入验证](../set-value-verification.md)。 |
+| 2026-11-08 | Linux 输入框点击 | 点击 GTK 3 输入框会把光标放进去，不再替用户按 Enter 提交。 | GTK 3 文本字段的 `activate` 是 Enter 键，不再作为点击 action；`auto` 改用指针点击。修复前点击输入框触发了它的 activate（提交），焦点也没有进入。 |
+| 2026-11-08 | macOS 鼠标释放 | 锁屏或 Locked Use 租约在拖拽、点击中途结束时，鼠标键不再一直按着。 | 抬起事件不再被会话检查拒绝；拖拽中途出错先在停下的位置松开再报错。 |
+| 2026-11-09 | Linux 会话发现 | Flatpak 进程不再污染宿主辅助功能连接。 | 不从其他进程导入 AT_SPI_BUS_ADDRESS，排除沙盒候选并忽略 argv 参数中的桌面进程名称；显式配置保留。 |
+| 2026-11-09 | Windows Chromium 选区 | 避免可选选区读取拖垮整个观察或动作调用。 | 原生窗口类识别 Chromium，未知窗口和嵌入式 Chromium 同样省略选区；普通原生文本选区保留。 |
+| 2026-11-08 | macOS 点击投递 | 一次点击不会因为 app 回了错误码而被再按一次。 | 点击链只在返回码证明 app 什么都没做时才换下一种方式；可能已生效的返回码直接报错并提示先读状态。 |
+| 2026-11-08 | macOS 密码框 | 往已有内容的密码框 type_text 不再把整个密码换成新输入；set_value 不再误报失败；密码不会进入快照和 query。 | 读取 AXValue 前先看 subrole，`AXSecureTextField` 的值从不读取；type_text 改走键盘输入，set_value 不回读。 |
+| 2026-11-08 | Linux 密码字段 | GTK 4 密码框的明文不再出现在快照里，Windows 同时保护密码值与选区。 | role 为 `password text` 的字段不读取值和选区；修复前 `GtkPasswordEntry` 的密码以明文出现在 `value` 和 tree 行。 |
+| 2026-11-07 | Locked Use 输入监控 | 兼容独占设备时仍检查键盘、指针等输入类别，避免误报健康。 | 逐设备管理回调与清理，热插拔 / 输入错误使当前监控失效；现有回归通过，按维护者决定先合并，Karabiner / Secure Input 接管实测留待发版后贡献者复测。见 [说明](../locked-use-input-monitor.md)。 |
+| 2026-11-07 | Locked Use 副屏遮罩 | 遮罩从创建时就放在目标屏幕上，避免依赖后续定位修正。 | 初始化改用屏幕局部坐标，保留严格覆盖检查；补物理双屏与左侧虚拟屏的真实前后对照。报告者锁屏环境的最终失败尚未完整复现，见 [验证说明](../locked-use-shield-placement.md)。 |
+| 2026-11-06 | macOS 截图与几何健壮性 | 部分出屏的窗口截图完整、坐标不偏移；AX 给出 NaN frame 时不再崩溃。 | 出屏时改走 ScreenCaptureKit 整窗捕获并校验尺寸；快照、查询与点击重读过滤非法 frame，补真实 AppKit 修复前后对照。见 [验证记录](../macos-snapshot-geometry.md)。 |
+| 2026-11-07 | v1.1.4 补丁发布 | 修复 Locked Use 任务结束和重连后的清理，改善三平台控件观察与写入反馈。 | 包含 #158、#145、#111；正式制品强制签名与公证。Locked Use 真实锁屏验证按维护者决定留待本版发布后。 |
+| 2026-11-07 | Locked Use 清理恢复 | 修复租约结束后 Guardian 清理被拒绝、阻止后续任务的问题。 | 区分活动租约所有者与清理连接身份，允许已结束租约的 Guardian 完成报告和释放确认，重连握手与普通报告统一消费指令；保留身份与释放门槛。离线回归通过，签名桌面闭环待验证。见 [计划](../exec-plans/completed/20261107-guardian-cleanup-after-idle.md)。 |
+| 2026-11-02 | 跨平台值写入验证 | 控件忽略或改写输入时，不再误报成功。 | macOS / Windows / Linux 的 set_value 验证实际值，文本精确比较并支持清空；保留两端空白，关闭完整回读仍校验，失败不重写。见 [说明](../set-value-verification.md)。 |
+| 2026-11-01 | 跨平台控件树预算 | 大列表不再优先挤掉窗口操作按钮。 | macOS / Windows / Linux 在有限候选中优先保留可见控件和普通界面区域，再按原树序输出；默认 1200 节点不变，预算不足明确提示，保留元素绑定与连续索引。见 [控件树预算](../tree-budget.md)。 |
+| 2026-11-02 | 发布公证门槛 | 防止正式制品在缺少公证凭据时继续发布。 | tag 与手动 npm 发布均强制公证；缺少签名 / 公证凭据即失败，Cursor Motion DMG 同样检查公证接受状态与票据有效性；保留手动只构建入口。 |
+| 2026-11-03 | Windows target capture and child clicks | Occluded-window screenshots no longer contain the covering application, and posted clicks reach native child controls. | Capture the target HWND with PrintWindow; resolve child controls and local coordinates; reject failed delivery, disabled targets and stale geometry. Global input remains opt-in, and background input depends on toolkit support. |
+| 2026-11-01 | 1.1.3 修复发布 | macOS 点击、文本输入与文件弹窗操作更准确，观察开销降低，跨平台输入更稳定。 | 同步版本源至 1.1.3；交付文本选区、按需 AX / 截图、Windows 滚动与 DPI 修复、Linux 观察优化、虚拟显示器显式启用，以及 Locked Use 安装组件公证票据打包修复。 |
+
 ## 2026-10
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-10-31 | macOS AX 读取速度 | 大型窗口的完整 AX tree 读取减少跨进程往返。 | 每次 tree walk 内批量读取常用 AX 属性并缓存，瞬时错误可重试；输出格式和 Frame 保持不变。`OPEN_COMPUTER_USE_DISABLE_AX_READ_CACHE=1` 可关闭缓存做对比。 |
+| 2026-10-31 | macOS 文本输入 | 焦点切到另一个输入框或 sheet 后，文字写入当前目标；输入替换选区并跟随光标，不再总是追加到末尾。 | 优先 AXSelectedText；不可用时按有效 UTF-16 选区替换可写 AXValue 并恢复光标。读不到焦点或写入失败时不回退到旧目标、不重复发送。补真实 AppKit、CLI 与 JS 回归。 |
+| 2026-10-31 | Locked Use 公证票据与诊断 | 安装组件随包携带公证票据，并可在不锁屏的情况下复现首次认证加载延迟。 | 修复仅给外层 App 附票据和 npm 提前打包的缺口：先公证并 staple 安装组件，再重签、公证外层 App，刷新全部制品；新增冷 / 热调用诊断和分发回归。安装后的解锁改善仍需正式构建实测。 |
+| 2026-10-30 | 虚拟显示器显式启用 | 默认不向模型提供虚拟显示器参数，避免意外改变显示器布局。 | 新增 `virtualDisplay.enabled=false` 与环境覆盖；关闭时隐藏 schema/JS/遮挡提示，在运行入口和底层阻止创建，保留恢复与结束清理。 |
+| 2026-10-29 | macOS 权限引导定位 | 已有辅助功能权限时，拖拽引导紧贴目标权限列表，更容易看清拖放方向；首次未授权时继续跟随设置窗口底边。 | 优先使用上方列表的增删控件容器定位，读不到时自动退回窗口锚点；后台有界读取 AX，跳过应用行。 |
+| 2026-10-29 | macOS 权限引导 | 切换回系统设置后，权限引导浮窗的返回按钮与拖拽卡片完整显示。 | 修复入场动画中断后保留中间尺寸与透明度的问题，并固定动画结束尺寸。 |
+| 2026-10-23 | macOS 软件光标不阻塞动作 | `click` / `set_value` / `select_text` 不再等光标动画播完才返回，每次点击少等约 1.6 秒；连续点击时光标加速追上。 | 光标动作异步投递到主队列按序播放；连续动作逐次加快到下限（`OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR`），空闲 2 秒恢复；弹簧时钟随节奏加速以保证落点；窗口追踪注册与光标动作同序，turn/session 结束取消旧动画与排队工作，窗口截图不含 overlay；一次性 `call` 不建 app、不画光标，单次点击 1859 → 210 ms。 |
+| 2026-10-23 | macOS agent display 排列与窗口 | 多显示器用户的显示器不再被 agent 显示器挤开，鼠标在自己的两块显示器之间移动不会穿过看不见的屏幕；上次遗留在 agent 显示器上的窗口不会在下一次停靠时从用户屏幕上消失。 | 创建 agent 显示器后，若 macOS 移动了用户的显示器，按创建前位置放回，agent 显示器放到最右侧显示器右边；单屏与镜像不改排列。macOS 按显示器身份移回 agent 显示器的旧窗口，按创建前的位置移回。 |
+| 2026-10-23 | macOS 点击命中测试 | 截图与窗口比例不是 1:1 时（如 Retina），`auto` 点击不再按下目标旁边的控件；只取 AX 的 element_index 点击也不再误报需要截图。 | `hitTestElement` 的入参本就是窗口点，改用窗口点换算，不再按截图像素再除一次缩放比例；修复前点击表格行会命中并按下上方列表头。 |
+| 2026-10-23 | macOS 坐标点击 | 坐标点击点到空白处时，不再按下窗口里别处的按钮（例如关闭窗口）。 | 点击候选的子孙扫描只按下落在目标上的元素：坐标点击要求包含点击点，element_index 点击要求与目标重叠；空白处落到定向鼠标事件；窗口索引走 Raise，不扫描内部按钮，无效尺寸的子孙被过滤。修复前点空白处会按下窗口的关闭按钮。 |
+| 2026-10-23 | macOS sheet 与文件选择器 | 网页上传、保存等以 sheet 弹出的面板（含 Firefox 文件选择器）出现在 tree 和截图里，元素点击与坐标点击落在面板上。 | app 的 focused window 是 sheet 时，`get_app_state` / `query` 以 sheet 为 root，tree、截图和输入目标都绑定到 sheet 的窗口，`agent_display` 仍停靠 sheet 所在的窗口；sheet 根索引不误按内部按钮，query 通过父链确认控件归属；此前 sheet 被跳过，Firefox 只返回底下的网页。 |
 | 2026-10-13 | Windows 滚动与坐标 | Windows 上 `scroll` 不再在默认配置下直接失败；150% 缩放且窗口位于屏幕右侧时，`get_app_state` 也能返回截图和窗口 bounds。 | 修复 `scroll` 请求漏传 `windowBounds` 导致坐标回退必然报 `No usable screenshot coordinates`；滚轮消息保留屏幕坐标并修正横向方向，PowerShell bridge 启动时对齐 DPI 物理坐标；`ScrollPattern` 在当前状态不可滚动时回退到坐标路径而不是让整个 tool call 失败。 |
 | 2026-10-13 | Windows 全局输入兜底 | 需要真实指针或键盘的 Windows 动作（`click_method=global`、WinUI 键盘输入、子控件点击）在显式授权后可用，默认路径完全不变。 | Windows 实现 `click_method=global` 真实指针点击；`drag` / `scroll` 的坐标回退在 `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` 时使用真实指针，按键另需显式 `key_method=global`，`app_post` 仍保持 HWND 消息语义；未授权时在任何物理输入前拒绝，核对目标前台 / 命中 / 几何并在异常时释放输入。 |
 | 2026-10-17 | 1.1.2 修复发布 | 软件光标持续跟随移动窗口，Linux 批量动作可减少回读开销，安装链接统一到新仓库。 | 同步所有版本源至 1.1.2；发布窗口锚点跟踪、Linux 动作回读配置与仓库改名后的 npm / 插件元信息，沿用既有命令和 App 签名身份。 |
