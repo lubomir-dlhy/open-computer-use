@@ -28,27 +28,54 @@ function findChromeForTesting() {
   return null;
 }
 
-const product = { name: "Trail Shoe", sku: "TS-42", price: "89.90", currency: "EUR" };
-const pages = {
-  "/product": `<!doctype html><title>Trail Shoe</title>
-<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "Product", name: product.name, sku: product.sku,
+const catalog = { "TS-42": { name: "Trail Shoe", price: "89.90", quantity: 7 }, "TS-43": { name: "Road Shoe", price: "74.50", quantity: 3 } };
+let stockShape = 1;
+const productPage = (sku) => {
+  const item = catalog[sku] ?? catalog["TS-42"];
+  return `<!doctype html><title>${item.name}</title>
+<script type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "Product", name: item.name, sku,
     brand: { "@type": "Brand", name: "Ridge" },
-    offers: { "@type": "Offer", price: product.price, priceCurrency: product.currency, availability: "https://schema.org/InStock" } })}</script>
+    offers: { "@type": "Offer", price: item.price, priceCurrency: "EUR", availability: "https://schema.org/InStock" } })}</script>
 <script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"sku":"TS-42","variants":3}}}</script>
-<h1>Trail Shoe</h1><p id="price">89,90 €</p><section id="stock"><p>Checking stock…</p></section>
-<button aria-label="Add to cart">+</button>
+<h1>${item.name}</h1><p id="price">${item.price.replace(".", ",")} €</p><section id="stock"><p>Checking stock…</p></section>
+<button aria-label="Add to cart" onclick="fetch('/api/cart', { method: 'POST', body: JSON.stringify({ sku: '${sku}' }) })">+</button>
 <script>setTimeout(async () => {
-  const stock = await (await fetch("/api/stock?sku=TS-42")).json();
+  const stock = await (await fetch("/api/stock?sku=${sku}")).json();
   document.querySelector("#stock").innerHTML = "<p>In stock: " + stock.quantity + " pairs</p>";
-}, 300);</script>`,
+}, 300);</script>`;
+};
+const pages = {
+  // The search API only answers requests the page signed for this load, so only a replay can run it.
+  "/search": `<!doctype html><title>Search</title><input id="q" placeholder="Search shoes"><button id="go">Search</button><ul id="results"></ul>
+<script>const sig = String(Math.random()).slice(2);
+document.querySelector("#go").onclick = async () => {
+  const q = document.querySelector("#q").value;
+  const answer = await (await fetch("/api/search?q=" + encodeURIComponent(q), { headers: { "x-request-sig": sig } })).json();
+  document.querySelector("#results").innerHTML = answer.results.map((r) => "<li>" + r.name + " " + r.price + "</li>").join("");
+};</script>`,
   "/challenge": `<!doctype html><title>Just a moment...</title><div id="challenge-form">Checking your browser</div>`,
 };
 const server = createServer((request, response) => {
   const url = new URL(request.url, "http://localhost");
-  if (url.pathname === "/old-product") { response.writeHead(301, { location: "/product" }); response.end(); return; }
+  if (url.pathname === "/old-product") { response.writeHead(301, { location: "/product?sku=TS-42" }); response.end(); return; }
+  const json = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
   if (url.pathname === "/api/stock") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ sku: url.searchParams.get("sku"), quantity: 7, warehouse: "BTS" }));
+    const sku = url.searchParams.get("sku");
+    if (!catalog[sku]) { json(404, { error: "unknown sku" }); return; }
+    json(200, stockShape === 1 ? { sku, quantity: catalog[sku].quantity, warehouse: "BTS" } : { item: sku, available: true });
+    return;
+  }
+  if (url.pathname === "/api/search") {
+    if (!request.headers["x-request-sig"]) { json(400, { error: "unsigned" }); return; }
+    const q = (url.searchParams.get("q") ?? "").toLowerCase();
+    json(200, { query: q, results: Object.entries(catalog).filter(([, item]) => item.name.toLowerCase().includes(q))
+      .map(([sku, item]) => ({ sku, name: item.name, price: Number(item.price), stock: { quantity: item.quantity } })) });
+    return;
+  }
+  if (url.pathname === "/api/cart") { json(200, { ok: true }); return; }
+  if (url.pathname === "/product") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(productPage(url.searchParams.get("sku") ?? "TS-42"));
     return;
   }
   const page = pages[url.pathname];
@@ -72,7 +99,7 @@ const chrome = spawn(chromePath, [
   // Without the mock keychain the network stack waits on the login keychain, which the temporary home lacks.
   "--headless=new", "--use-mock-keychain", `--user-data-dir=${profile}`, `--load-extension=${path.join(root, "apps/OpenComputerUseBrowserExtension")}`,
   "--no-first-run", "--no-default-browser-check", "--disable-search-engine-choice-screen", "about:blank",
-], { env, stdio: "ignore" });
+], { env, stdio: "ignore", detached: true });
 
 // The extension starts the native host once its service worker runs; its socket means Chrome is reachable.
 const sockets = path.join(home, "Library/Application Support/OpenComputerUse/Browser");
@@ -109,7 +136,8 @@ try {
   await request("initialize", { protocolVersion: "2025-03-26", clientInfo: { name: "e2e", version: "1" }, capabilities: {} });
   const opened = await browser({ action: "open", url: `${base}/old-product` });
   console.log(opened.split("\n").slice(0, 3).join("\n"));
-  assert.match(opened, /HTTP 200, redirected from .*\/old-product \(301\)/);
+  // The redirect is in the network log when the debugger attached in time, else counted by the page.
+  assert.match(opened, /HTTP 200, (redirected from .*\/old-product \(301\)|after 1 redirect)/);
 
   const extracted = await browser({ action: "extract" });
   console.log(extracted.split("\n")[0]);
@@ -117,13 +145,13 @@ try {
   assert.match(extracted, /Embedded JSON .*script#__NEXT_DATA__/);
   assert.match(await browser({ action: "extract", selector: "script#__NEXT_DATA__" }), /"variants":3/);
 
-  const idle = await browser({ action: "wait", load: "networkidle", wait_for: "In stock" });
-  assert.match(idle, /In stock: 7 pairs/);
+  await browser({ action: "wait", load: "networkidle", wait_for: "In stock" });
+  assert.match(await browser({ action: "snapshot", find: "in stock" }), /In stock: 7 pairs/);
   const requests = await browser({ action: "requests" });
   console.log(requests);
   const stockID = /^(r\d+) GET 200 fetch application\/json .*\/api\/stock\?sku=TS-42$/m.exec(requests)?.[1];
   assert.ok(stockID, "the stock API call is listed");
-  assert.match(requests, /^r\d+ GET 301 document \/old-product → redirect$/m);
+  if (/redirected from/.test(opened)) assert.match(requests, /^r\d+ GET 301 document \/old-product → redirect$/m);
   const body = await browser({ action: "requests", request: stockID });
   assert.match(body, /"quantity":7/);
   assert.match(await browser({ action: "requests", filter: "stock" }), /\/api\/stock/);
@@ -139,10 +167,58 @@ try {
   assert.match(await browser({ action: "navigate", url: `${base}/discontinued` }), /^HTTP 404/m);
   const blocked = await browser({ action: "navigate", url: `${base}/challenge` });
   assert.match(blocked, /Bot check: Cloudflare challenge/);
+
+  // Saved flows: a stock check through the page tier, product data from HTML, and a signed search by replay.
+  await browser({ action: "open", url: `${base}/product?sku=TS-42` });
+  await browser({ action: "wait", load: "networkidle", wait_for: "In stock" });
+  const savedStock = await browser({ action: "flow_save", flow: "stock", params: { sku: "TS-42" }, description: "stock for a SKU" });
+  console.log(savedStock);
+  assert.match(savedStock, /Saved flow 127\.0\.0\.1\/stock .*GET .*\/api\/stock\?sku=\{\{sku\}\}/);
+  const stock43 = await browser({ action: "flow_run", flow: "stock", params: { sku: "TS-43" } });
+  console.log(stock43);
+  assert.match(stock43, /^Flow 127\.0\.0\.1\/stock via page: HTTP 200\n.*"quantity":3/);
+  assert.match(await browser({ action: "flow_run", flow: "stock", params: { sku: "TS-43" }, fields: "quantity" }), /\n\{"quantity":3\}$/);
+  const unknown = await request("tools/call", { name: "browser", arguments: { action: "flow_run", flow: "stock", params: { sku: "XX-1" } } });
+  assert.match(unknown.result.content[0].text, /not_found \(HTTP 404\)/);
+  await assert.rejects(browser({ action: "flow_run", flow: "stock" }), /needs params sku/);
+  // A value is encoded into the query, so it cannot move the request elsewhere.
+  await assert.rejects(browser({ action: "flow_run", flow: "stock", params: { sku: "x&sku=TS-42/../@evil.example" } }), /not_found \(HTTP 404\)/);
+
+  const savedPrice = await browser({ action: "flow_save", flow: "price", output: "extract", params: { sku: "TS-42" } });
+  assert.match(savedPrice, /product data of .*\/product\?sku=\{\{sku\}\}/);
+  assert.match(await browser({ action: "flow_run", flow: "price", params: { sku: "TS-43" } }), /Product "Road Shoe", 74\.50 EUR \(InStock\), sku TS-43/);
+
+  await browser({ action: "click", name: "Add to cart" });
+  const withWrite = await browser({ action: "flow_save", flow: "stock-after-cart", params: { sku: "TS-42" } });
+  assert.match(withWrite, /Not replayable: the recording changed data on the site \(POST \/api\/cart\)/);
+  const cartID = /^(r\d+) POST/m.exec(await browser({ action: "requests", type: "all", filter: "cart" }))?.[1];
+  await assert.rejects(browser({ action: "flow_save", flow: "cart", output: cartID }), /may change data; flows only save reads/);
+
+  const searchPage = await browser({ action: "open", url: `${base}/search` });
+  assert.match(searchPage, /Saved flows for this site: .*stock\(sku\)/);
+  const input = /\[(\d+)\] textbox "Search shoes"/.exec(searchPage)[1];
+  await browser({ action: "type", ref: Number(input), text: "shoe" });
+  await browser({ action: "click", name: "Search", wait_for: "Road Shoe" });
+  const savedSearch = await browser({ action: "flow_save", flow: "search", params: { query: "shoe" } });
+  console.log(savedSearch);
+  assert.match(savedSearch, /list is at results/);
+  const searched = await browser({ action: "flow_run", flow: "search", params: { query: "road" }, fields: "sku,price,stock.quantity" });
+  console.log(searched);
+  assert.match(searched, /via replay: HTTP 200/);
+  assert.match(searched, /"items":\[\{"price":74\.5,"sku":"TS-43","stock\.quantity":3\}\]/);
+  const filtered = await browser({ action: "flow_run", flow: "search", params: { query: "shoe" }, where: "name=trail", limit: 1 });
+  assert.match(filtered, /"matched":1/);
+  assert.match(filtered, /"total":2/);
+  assert.match(await browser({ action: "flow_list" }), /127\.0\.0\.1\/search\(query\) — .*\[replay, verified/);
+
+  stockShape = 2;
+  await assert.rejects(browser({ action: "flow_run", flow: "stock", params: { sku: "TS-43" } }), /failed \(page: the answer changed shape \(missing quantity/);
+  assert.match(await browser({ action: "flow_list" }), /stock\(sku\) — stock for a SKU \[page, unverified/);
   console.log("browser e2e smoke passed");
 } finally {
   mcp.kill();
-  chrome.kill();
+  // Chrome's helpers outlive a SIGTERM to the browser process; end the whole group.
+  try { process.kill(-chrome.pid, "SIGKILL"); } catch {}
   server.close();
   await new Promise((resolve) => setTimeout(resolve, 300));
   rmSync(temp, { recursive: true, force: true });

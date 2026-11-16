@@ -3,7 +3,7 @@ import Foundation
 /// The `browser` tool: Chrome tabs driven through the extension's debugger
 /// connection, so nothing is clicked on screen and Chrome never comes forward.
 final class BrowserTool {
-    private let bridge: BrowserBridge
+    let bridge: BrowserBridge
 
     init(bridge: BrowserBridge = .shared) {
         self.bridge = bridge
@@ -13,6 +13,7 @@ final class BrowserTool {
         "tabs", "open", "claim", "navigate", "back", "forward", "reload", "close", "keep", "show",
         "snapshot", "screenshot", "click", "hover", "type", "key", "scroll", "drag", "select",
         "wait", "dialog", "upload", "download", "evaluate", "requests", "extract",
+        "flow_save", "flow_run", "flow_list",
     ]
 
     private struct Snapshot {
@@ -34,6 +35,24 @@ final class BrowserTool {
         guard let action = arguments["action"] as? String, Self.actions.contains(action) else {
             throw ComputerUseError.invalidArguments("action must be one of \(Self.actions.joined(separator: ", "))")
         }
+        switch action {
+        case "flow_save": return try saveFlow(arguments)
+        case "flow_run": return try runFlow(arguments)
+        case "flow_list": return try listFlows(arguments)
+        default: break
+        }
+        let pending = recordableStep(action, arguments)
+        let result = try dispatch(arguments)
+        if let pending, !result.isError { record(pending, arguments) }
+        if ["open", "navigate"].contains(action), !result.isError, let note = flowHint() {
+            return ToolCallResult(content: result.content + [.text(note)], isError: false)
+        }
+        return result
+    }
+
+    /// Runs an action without recording it: flow runs replay through here.
+    func dispatch(_ arguments: [String: Any]) throws -> ToolCallResult {
+        let action = arguments["action"] as? String ?? ""
         switch action {
         case "tabs":
             return try listTabs(profile: arguments["profile"] as? String)
@@ -495,14 +514,20 @@ final class BrowserTool {
         return .text(Self.clip(output.joined(separator: "\n"), arguments["max_chars"] as? Int ?? 6000, hint: "narrow the pattern"))
     }
 
-    private func networkLog(_ id: Int) throws -> [String: Any] {
+    func networkLog(_ id: Int) throws -> [String: Any] {
         try bridge.call("networkLog", ["tabId": id]) as? [String: Any] ?? [:]
     }
 
     /// The HTTP status of the page's last load, with its redirects; nil when unknown.
     private func navigationStatus(_ id: Int) -> String? {
+        let page = href(id)
         guard let log = try? networkLog(id), let entries = log["entries"] as? [[String: Any]],
-              let last = entries.last(where: { $0["main"] as? Bool == true }) else { return nil }
+              let last = entries.last(where: { $0["main"] as? Bool == true }), last["url"] as? String == page else {
+            // The log can miss a load that started before the debugger was ready; the page still knows its status.
+            guard let timing = (try? evaluate(id, "(e => e ? [e.responseStatus ?? 0, e.redirectCount] : null)(performance.getEntriesByType('navigation')[0])")) as? [Int],
+                  timing.count == 2, timing[0] > 0 else { return nil }
+            return "HTTP \(timing[0])" + (timing[1] > 0 ? ", after \(timing[1]) redirect\(timing[1] == 1 ? "" : "s")" : "")
+        }
         var parts: [String] = []
         if let failed = last["failed"] as? String {
             parts.append("Load failed: \(failed)")
@@ -581,7 +606,7 @@ final class BrowserTool {
         return parts.joined(separator: " ")
     }
 
-    private static func byteCount(_ bytes: Int) -> String {
+    static func byteCount(_ bytes: Int) -> String {
         bytes < 1024 ? "\(bytes) B" : bytes < 1_048_576 ? String(format: "%.1f KB", Double(bytes) / 1024) : String(format: "%.1f MB", Double(bytes) / 1_048_576)
     }
 
@@ -617,7 +642,7 @@ final class BrowserTool {
         return .text(Self.clip(lines.joined(separator: "\n"), arguments["max_chars"] as? Int ?? 8000, hint: "raise max_chars, or fetch and filter it with evaluate"))
     }
 
-    private func extract(_ id: Int, _ arguments: [String: Any]) throws -> ToolCallResult {
+    func extract(_ id: Int, _ arguments: [String: Any]) throws -> ToolCallResult {
         guard let raw = try call(id, "structured") as? [String: Any] else {
             throw ComputerUseError.stateUnavailable("the page returned no structured data")
         }
@@ -706,7 +731,7 @@ final class BrowserTool {
         return lines
     }
 
-    private func compactJSON(_ value: Any) -> String {
+    func compactJSON(_ value: Any) -> String {
         guard JSONSerialization.isValidJSONObject(value),
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return "\(value)" }
         return String(decoding: data, as: UTF8.self)
@@ -743,11 +768,11 @@ final class BrowserTool {
         }
     }
 
-    private func href(_ id: Int) -> String? {
+    func href(_ id: Int) -> String? {
         (try? evaluate(id, "location.href")) as? String
     }
 
-    private func waitForLoad(_ id: Int, timeout: TimeInterval, leaving previous: String? = nil) {
+    func waitForLoad(_ id: Int, timeout: TimeInterval, leaving previous: String? = nil) {
         let deadline = Date().addingTimeInterval(timeout)
         let start = Date()
         while Date() < deadline {
@@ -758,7 +783,7 @@ final class BrowserTool {
         }
     }
 
-    private func poll(_ timeout: TimeInterval, _ what: String, _ condition: () -> Bool) throws {
+    func poll(_ timeout: TimeInterval, _ what: String, _ condition: () -> Bool) throws {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             if condition() { return }
@@ -771,7 +796,7 @@ final class BrowserTool {
 
     // MARK: - Page access
 
-    private func evaluate(_ id: Int, _ expression: String, timeout: TimeInterval = 10) throws -> Any? {
+    func evaluate(_ id: Int, _ expression: String, timeout: TimeInterval = 10) throws -> Any? {
         let result = try bridge.cdp(id, "Runtime.evaluate", ["expression": expression, "returnByValue": true,
                                                               "awaitPromise": true, "userGesture": true], timeout: timeout)
         if let exception = result["exceptionDetails"] as? [String: Any] {
@@ -792,7 +817,7 @@ final class BrowserTool {
     }
 
     /// Calls a helper from the page script, installing it first if the document is new.
-    private func call(_ id: Int, _ function: String, _ arguments: Any...) throws -> Any? {
+    func call(_ id: Int, _ function: String, _ arguments: Any...) throws -> Any? {
         let encoded = arguments.map { json($0) }.joined(separator: ",")
         return try evaluate(id, "\(browserPageScript);window.__ocu.\(function)(\(encoded))")
     }
@@ -903,7 +928,7 @@ final class BrowserTool {
 
     // MARK: - Arguments
 
-    private func tab(_ arguments: [String: Any]) throws -> Int {
+    func tab(_ arguments: [String: Any]) throws -> Int {
         if let id = arguments["tab"] as? Int {
             bridge.session { $0.currentTab = id }
             return id
@@ -919,14 +944,14 @@ final class BrowserTool {
         return value
     }
 
-    private func string(_ key: String, _ arguments: [String: Any]) throws -> String {
+    func string(_ key: String, _ arguments: [String: Any]) throws -> String {
         guard let value = arguments[key] as? String, !value.isEmpty else {
             throw ComputerUseError.invalidArguments("\(key) must be a non-empty string")
         }
         return value
     }
 
-    private func wait(_ arguments: [String: Any], default value: TimeInterval) -> TimeInterval {
+    func wait(_ arguments: [String: Any], default value: TimeInterval) -> TimeInterval {
         (arguments["wait_timeout"] as? Double).map { min(max($0, 0.1), 60) } ?? value
     }
 }

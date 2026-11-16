@@ -2,7 +2,7 @@
 /// lifetime in that document, so a later snapshot can be diffed against an earlier one.
 let browserPageScript = #"""
 (() => {
-  if (window.__ocu && window.__ocu.v === 3) return;
+  if (window.__ocu && window.__ocu.v === 4) return;
   const refs = new Map();
   const ids = new WeakMap();
   let next = 1;
@@ -247,7 +247,7 @@ let browserPageScript = #"""
   }
 
   // schema.org JSON-LD, product meta tags and microdata: prices and stock without reading the layout.
-  function structured() {
+  function structured(doc = document) {
     const jsonld = [];
     const visit = (node) => {
       if (Array.isArray(node)) { node.forEach(visit); return; }
@@ -255,28 +255,68 @@ let browserPageScript = #"""
       if (Array.isArray(node["@graph"])) { node["@graph"].forEach(visit); return; }
       jsonld.push(node);
     };
-    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
       try { visit(JSON.parse(script.textContent)); } catch {}
     }
     const meta = {};
-    for (const tag of document.querySelectorAll("meta[property], meta[name], meta[itemprop]")) {
+    for (const tag of doc.querySelectorAll("meta[property], meta[name], meta[itemprop]")) {
       const key = tag.getAttribute("property") || tag.getAttribute("itemprop") || tag.getAttribute("name");
       if (/^(og:(title|type|url|price|availability)|og:price:|product:|twitter:data|price|pricecurrency|availability|sku|gtin)/i.test(key) && tag.content)
         meta[key] = clean(tag.content, 200);
     }
-    const microdata = [...document.querySelectorAll("[itemscope][itemtype*='schema.org/Product' i]")].slice(0, 20).map((item) => {
+    const microdata = [...doc.querySelectorAll("[itemscope][itemtype*='schema.org/Product' i]")].slice(0, 20).map((item) => {
       const prop = (name) => {
         const el = item.querySelector(`[itemprop="${name}"]`);
-        return el ? clean(el.getAttribute("content") ?? el.getAttribute("href") ?? el.innerText, 120) : undefined;
+        return el ? clean(el.getAttribute("content") ?? el.getAttribute("href") ?? el.textContent, 120) : undefined;
       };
       return { name: prop("name"), sku: prop("sku"), gtin: prop("gtin13") ?? prop("gtin"), price: prop("price"),
                priceCurrency: prop("priceCurrency"), availability: prop("availability"), url: prop("url") };
     });
-    const embedded = [...document.querySelectorAll("script[type='application/json'], script#__NEXT_DATA__, script#__NUXT_DATA__")]
+    const embedded = [...doc.querySelectorAll("script[type='application/json'], script#__NEXT_DATA__, script#__NUXT_DATA__")]
       .filter((script) => script.textContent.length > 2)
       .map((script) => ({ selector: script.id ? `script#${script.id}` : null, bytes: script.textContent.length }))
       .filter((entry) => entry.selector);
     return { jsonld, meta, microdata, embedded };
+  }
+
+  // A target that survives a reload: a selector unique on this page, plus the name as a fallback.
+  function stableTarget(target) {
+    const el = resolve(target);
+    const unique = (selector) => { try { return document.querySelectorAll(selector).length === 1 ? selector : null; } catch { return null; } };
+    const attr = (name) => el.getAttribute(name);
+    const tag = el.tagName.toLowerCase();
+    const candidates = [
+      el.id && !generatedID(el.id) ? `#${CSS.escape(el.id)}` : null,
+      attr("data-testid") ? `[data-testid=${quote(attr("data-testid"))}]` : null,
+      attr("name") ? `${tag}[name=${quote(attr("name"))}]` : null,
+      attr("aria-label") ? `${tag}[aria-label=${quote(attr("aria-label"))}]` : null,
+      attr("placeholder") ? `${tag}[placeholder=${quote(attr("placeholder"))}]` : null,
+      tag === "a" && attr("href") && !/^javascript:/i.test(attr("href")) ? `a[href=${quote(attr("href"))}]` : null,
+    ];
+    let selector = candidates.map((candidate) => candidate && unique(candidate)).find(Boolean) ?? null;
+    if (!selector) {
+      const path = [];
+      for (let node = el; node && node !== document.body && path.length < 8; node = node.parentElement) {
+        if (node.id && !generatedID(node.id)) { path.unshift(`#${CSS.escape(node.id)}`); break; }
+        const siblings = node.parentElement ? [...node.parentElement.children].filter((child) => child.tagName === node.tagName) : [];
+        path.unshift(siblings.length > 1 ? `${node.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(node) + 1})` : node.tagName.toLowerCase());
+      }
+      selector = unique(path.join(" > "));
+    }
+    const role = roleOf(el);
+    const name = role === "heading" ? clean(el.innerText, 120) : nameOf(el, role ?? "", false);
+    return { selector, name: name || null };
+  }
+
+  // A saved flow's request, sent from the page so the site's own session and origin apply.
+  async function flowFetch(request) {
+    const response = await fetch(request.url, { method: request.method, headers: request.headers ?? {}, body: request.body ?? undefined,
+      credentials: "include", redirect: "follow", cache: "no-store" });
+    const text = await response.text();
+    const result = { status: response.status, contentType: response.headers.get("content-type") ?? "", url: response.url, bytes: text.length };
+    if (request.extract) result.structured = structured(new DOMParser().parseFromString(text, "text/html"));
+    else result.text = text.slice(0, 5_000_000);
+    return result;
   }
 
   function embedded(selector) {
@@ -430,7 +470,7 @@ let browserPageScript = #"""
     return `${location.href}|${document.readyState}|${document.getElementsByTagName("*").length}|${document.body?.innerText.length ?? 0}`;
   }
   Object.defineProperty(window, "__ocu", {
-    value: { v: 3, snapshot, structured, embedded, challenge, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
+    value: { v: 4, snapshot, structured, embedded, challenge, stableTarget, flowFetch, resolve, point, focus, selectOption, pasteRich, scrollPosition, scrollBy, syntheticDrag, textState, signature,
              fileInput: (target) => { const el = resolve(target); return el.tagName === "INPUT" && el.type === "file" ? el : null; } },
     enumerable: false,
     configurable: true

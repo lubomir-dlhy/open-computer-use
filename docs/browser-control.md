@@ -52,10 +52,44 @@ MCP client ── browser tool ── BrowserBridge ──unix socket──▶ o
 | `extract` | Structured data: one line per schema.org product (price, currency, availability, SKU/GTIN, brand) from JSON-LD, microdata or product meta tags, then the raw JSON-LD, meta and microdata; lists embedded JSON scripts (`__NEXT_DATA__`, …), which `selector` reads. |
 | `requests` | The tab's network log: documents, XHR, fetch and JSON of the current page (`type` widens it, `filter` narrows by URL), `r<id>` each; `request: "r12"` returns that response's body. |
 
+## Saved flows (experimental)
+
+A task an agent repeats with other inputs (the stock of another SKU, the price of another product) can be saved
+once and then run without driving the page. Adapted from agent-browser's saved flows (v0.42), for a tool that runs
+in the user's own Chrome.
+
+- **Recording** is always on: every replayable action in a tab (`open`, `navigate`, `back`, `forward`, `reload`,
+  `click`, `hover`, `type`, `key`, `scroll`, `select`, `wait`) is kept with the network-log id it started after.
+  A `ref` is turned into a selector unique on the page (id, `data-testid`, `name`, `aria-label`, `placeholder`,
+  `href`, else an `nth-of-type` path) plus the element's name before the action runs. Coordinates make a step
+  unreplayable.
+- **`flow_save`** (`flow`, `params`, `output`, `description`) takes the steps since the tab's last `open` or
+  `navigate`. `output` is the request that answers the task (`r12`), or `extract` for the page's product data;
+  by default the JSON response from the site that used a param, else the largest. `params` maps names to the
+  example values the recording used: they become `{{name}}` in the start URL, the output's URL path and query and
+  body, and typed text, never in a host. Only reads are saved: GET, or GraphQL documents with no mutation. Other
+  first-party requests in the range (telemetry aside) are listed as writes and the flow then never replays. Cookies
+  and credential, CSRF, token and signature headers are never recorded. The answer's key paths (lists by their first
+  items) and its largest list are stored. Files: `~/Library/Application Support/OpenComputerUse/flows/<site>/<name>.json`, mode 0600.
+- **`flow_run`** (`flow`, `params`, `fields`, `where`, `limit`) tries the tier that worked last, then the other:
+  - *page*: the request with `fetch` (credentials included) from a background tab on the site, opened at the start
+    URL once per session and reused, so a loop over SKUs costs one fetch each. HTML outputs are parsed for product data.
+  - *replay*: the recorded steps in a fresh background tab, then the matching request read from its network log.
+  Values are URL-encoded into URLs and placed inside JSON strings in bodies; a rendered URL off the flow's site, or a
+  query a value would turn into a mutation, is refused. 401/403 (`auth_expired`), 404/410 (`not_found`) and 429
+  (`rate_limited`) end the run. An answer missing a quarter of the saved paths, or the list, has drifted: the next
+  tier is tried, and the flow is marked unverified when none answers. `where` (`field=value`, substring),
+  `fields` and `limit` apply to the saved list.
+- **`flow_list`** lists flows (`url` narrows to a site); `open` and `navigate` mention a site's flows.
+
+Not done: agent-browser's direct-HTTP tier (would need the browser's cookies and resolving only public addresses),
+flows that write.
+
 ## Network log and page status
 
-The extension attaches to a tab before `open` and the navigation actions load anything, and enables CDP `Network`, so
-the log holds the page load itself. Per tab it keeps the last 400 requests (redirect hops included, with status, MIME
+The extension attaches to a tab as `open` starts loading it (attaching to a tab Chrome has not given a renderer yet
+stalls the debugger session) and before the navigation actions, and enables CDP `Network`, so the log holds the
+page's requests; when it missed the main document, its status comes from the page's Navigation Timing entry. Per tab it keeps the last 400 requests (redirect hops included, with status, MIME
 type, size and up to 2 KB of a request body) until the tab closes; bodies are read on demand with
 `Network.getResponseBody` while the debugger is attached (it detaches at turn end). `open`, `navigate`, `back`,
 `forward` and `reload` report the main document's `HTTP <status>` and any redirects. A snapshot whose page is a bot

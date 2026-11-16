@@ -532,3 +532,27 @@ test("disabled virtual displays reject stale JS options before native dispatch",
   assert.equal(restored.isError, false);
   assert.equal(native.calls.at(-1).arguments.window_placement, "restore");
 });
+
+test("cua.browser saves and runs flows and parses their answers", async () => {
+  const native = mockNative();
+  native.request = async (method, params) => {
+    native.calls.push(params);
+    const action = params.arguments.action;
+    if (action === "open") return textResult("Tab 7 opened in the background.\npage");
+    if (action === "flow_run") return textResult('Flow shop.test/stock via page: HTTP 200\nFell back after replay: x.\n{"quantity":3}');
+    return textResult(`did ${action}`);
+  };
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var tab = await cua.browser.open("https://shop.test/p?sku=A", { emit: false });
+    await tab.flowSave("stock", { params: { sku: "A" }, output: "r3" });
+    var answer = await cua.browser.flowRun("stock", { sku: "B" }, { fields: "quantity", limit: 2 });
+    nodeRepl.write(String(answer.quantity));
+  `);
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content.map(item => item.text), ["3"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))).slice(1), [
+    { action: "flow_save", tab: 7, flow: "stock", params: { sku: "A" }, output: "r3" },
+    { action: "flow_run", flow: "stock", params: { sku: "B" }, fields: "quantity", limit: 2 },
+  ]);
+});

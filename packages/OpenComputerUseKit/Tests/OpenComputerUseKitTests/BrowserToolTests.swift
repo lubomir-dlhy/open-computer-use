@@ -104,4 +104,76 @@ final class BrowserToolTests: XCTestCase {
         XCTAssertEqual(BrowserTool.clip("abcdef", 4, hint: "raise max_chars"), "abcd… (2 more chars; raise max_chars)")
         XCTAssertEqual(BrowserTool.clip("abc", 4, hint: "x"), "abc")
     }
+
+    func testFlowSitesKeepRegistrableDomains() {
+        XCTAssertEqual(browserFlowSite("shop.example.co.uk"), "example.co.uk")
+        XCTAssertEqual(browserFlowSite("www.alza.cz"), "alza.cz")
+        XCTAssertEqual(browserFlowSite("api.eu.shop.com"), "shop.com")
+        XCTAssertEqual(browserFlowSite("127.0.0.1"), "127.0.0.1")
+        XCTAssertEqual(browserFlowSite("localhost"), "localhost")
+    }
+
+    func testFlowShapeAndDrift() throws {
+        let answer: [String: Any] = ["total": 2, "results": [
+            ["sku": "A", "price": 1, "stock": ["quantity": 3], "badge": "new"],
+            ["sku": "B", "price": 2, "stock": ["quantity": 0]],
+        ]]
+        let shape = browserFlowShape(answer)
+        XCTAssertEqual(shape, ["results", "results[].price", "results[].sku", "results[].stock", "results[].stock.quantity", "total"])
+        XCTAssertEqual(browserFlowList(answer), "results")
+        XCTAssertTrue(shape.allSatisfy { !browserFlowPathMissing($0, in: answer) })
+        let changed: [String: Any] = ["total": 2, "results": [["id": "A", "price": 1]]]
+        XCTAssertEqual(shape.filter { browserFlowPathMissing($0, in: changed) }, ["results[].sku", "results[].stock", "results[].stock.quantity"])
+        XCTAssertFalse(browserFlowPathMissing("results[].sku", in: ["results": []]), "an empty list is an answer, not a change")
+        XCTAssertEqual(browserFlowShape([["a": 1]]), ["[].a"])
+        XCTAssertFalse(browserFlowPathMissing("[].a", in: [["a": 2]]))
+    }
+
+    func testFlowOutputFiltersProjectsAndLimits() throws {
+        let answer: [String: Any] = ["results": [
+            ["name": "Trail Shoe", "price": 89.9, "stock": ["quantity": 7]],
+            ["name": "Road Shoe", "price": 74.5, "stock": ["quantity": 0]],
+            ["name": "Trail Sock", "price": 9, "stock": ["quantity": 40]],
+        ]]
+        let shaped = browserFlowShape(output: answer, list: "results", where: "name=trail", fields: "name,stock.quantity", limit: 1) as? [String: Any]
+        XCTAssertEqual(shaped?["total"] as? Int, 3)
+        XCTAssertEqual(shaped?["matched"] as? Int, 2)
+        XCTAssertEqual((shaped?["items"] as? [[String: Any]])?.first?["stock.quantity"] as? Int, 7)
+        XCTAssertEqual((shaped?["items"] as? [Any])?.count, 1)
+        let root = browserFlowShape(output: ["price": 5, "currency": "EUR", "debug": true], list: nil, where: nil, fields: "price", limit: nil) as? [String: Any]
+        XCTAssertEqual(root?.keys.sorted(), ["price"])
+    }
+
+    func testFlowsOnlySaveReads() {
+        XCTAssertTrue(BrowserTool.isGraphQLQuery(#"{"query":"query Product($id: ID!) { product(id: $id) { price } }","variables":{"id":"1"}}"#))
+        XCTAssertTrue(BrowserTool.isGraphQLQuery(#"{"query":"{ product { price } }"}"#))
+        XCTAssertFalse(BrowserTool.isGraphQLQuery(#"{"query":"mutation AddToCart { add(id: 1) { ok } }"}"#))
+        XCTAssertFalse(BrowserTool.isGraphQLQuery(#"[{"query":"{ a }"},{"query":"mutation { b }"}]"#))
+        XCTAssertFalse(BrowserTool.isGraphQLQuery(#"{"operationName":"Persisted","extensions":{}}"#))
+        XCTAssertFalse(BrowserTool.isGraphQLQuery("sku=1"))
+        XCTAssertTrue(BrowserTool.isTelemetry("https://shop.example/api/collect?v=2"))
+        XCTAssertTrue(BrowserTool.isTelemetry("https://shop.example/cdn-cgi/rum"))
+        XCTAssertFalse(BrowserTool.isTelemetry("https://shop.example/api/products/events-calendar"))
+        XCTAssertEqual(BrowserTool.urlEncoded("a b&c=/d"), "a%20b%26c%3D%2Fd")
+        XCTAssertEqual(BrowserTool.stopStatus(429)?.hasPrefix("rate_limited"), true)
+        XCTAssertNil(BrowserTool.stopStatus(500))
+    }
+
+    func testFlowFilesRoundTrip() throws {
+        let flow = BrowserFlow(name: "stock", site: "example.com", profile: nil, startURL: "https://example.com/p?sku={{sku}}", description: nil,
+                               params: ["sku": "TS-42"],
+                               output: .init(kind: "request", method: "GET", url: "https://example.com/api?sku={{sku}}", body: nil, headers: ["accept": "application/json"], shape: ["sku"], list: nil),
+                               steps: [.init(action: "type", args: ["text": .string("{{sku}}"), "clear": .bool(true), "amount": .number(2), "modifiers": .strings(["shift"])])],
+                               writes: [], tier: "page", verified: true, verifiedAt: Date(timeIntervalSince1970: 0), createdAt: Date(timeIntervalSince1970: 0))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(BrowserFlow.self, from: try encoder.encode(flow))
+        XCTAssertEqual(decoded.steps[0].args, flow.steps[0].args)
+        XCTAssertEqual(decoded.steps[0].args["amount"]?.any as? Int, 2)
+        XCTAssertEqual(FlowValue(NSNumber(value: true)), .bool(true))
+        XCTAssertEqual(FlowValue(NSNumber(value: 1)), .number(1))
+        XCTAssertTrue(decoded.replayable)
+    }
 }

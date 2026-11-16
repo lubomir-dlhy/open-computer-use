@@ -63,6 +63,7 @@ Chrome, through the Open Computer Use Browser extension (background tabs; Chrome
 - Targets: a ref number, a CSS selector string, \`[x, y]\`, or \`{ name: "Submit" }\`.
 - \`tab.click(target, { clickCount?, button?, modifiers?, hold? })\`, \`tab.hover(target)\`, \`tab.type(target, text, { clear?, secretEnv?, format? })\`, \`tab.key("Enter")\`, \`tab.scroll(target, "down", 1)\`, \`tab.drag(from, to)\` (real HTML5 drag-and-drop), \`tab.select(target, optionText)\`, \`tab.upload(target, [paths])\`, \`tab.download(target)\`, \`tab.wait({ url?, load?, selector? })\`, \`tab.dialog(accept, promptText?)\`, \`tab.navigate(url)\`, \`tab.back()\`, \`tab.reload()\`, \`tab.snapshot({ find?, ref?, maxChars? })\`, \`tab.screenshot()\`, \`await tab.evaluate(expression)\` (parsed JSON).
 - Data without the layout: \`await tab.extract()\` (one line per product with price and stock, then JSON-LD, meta and microdata; \`tab.extract("script#__NEXT_DATA__")\` reads embedded JSON), \`await tab.requests({ filter?, type? })\` lists the page's requests and \`await tab.response("r12")\` returns one body (parsed when JSON). \`tab.wait({ load: "networkidle" })\` waits until nothing loads.
+- Saved flows (experimental), for a task you will repeat with other inputs: do it once in a tab, then \`await tab.flowSave("stock", { params: { sku: "TS-42" } })\` (the example value as typed or used in a URL; \`output: "r12"\` or \`"extract"\` picks the answer). Later \`await cua.browser.flowRun("stock", { sku: "TS-43" }, { fields?, where?, limit? })\` returns the answer (parsed when JSON) without driving the page, and throws when the site changed: continue in the page then. \`await cua.browser.flows()\` lists them.
 - Tabs you open close when your turn ends; \`await tab.keep()\` keeps one that holds the result.
 
 After actions, call \`getAXState()\` in the same js invocation when the next decision depends on the updated UI. Re-derive element indexes from fresh state after navigation or layout changes. Prefer element indexes over coordinates. Open Computer Use keeps its existing local safety gates, including password-manager denial and explicit authorization for global pointer fallbacks.`;
@@ -403,6 +404,7 @@ export function createCuaApi(native, activeOutput) {
       reload: (options = {}) => run("reload", {}, options),
       keep: (status = "deliverable") => run("keep", { status }),
       close: () => run("close", {}),
+      flowSave: (flow, options = {}) => run("flow_save", { flow, ...pick(options, { params: "params", output: "output", description: "description" }) }, options),
       extract: (selector, options = {}) => run("extract", { ...(selector ? { selector } : {}), ...pick(options, { maxChars: "max_chars" }) }, options),
       requests: (options = {}) => run("requests", pick(options, { filter: "filter", type: "type" }), options),
       async response(request, options = {}) {
@@ -433,6 +435,17 @@ export function createCuaApi(native, activeOutput) {
       const { text } = await browser("claim", { tab });
       if (options.emit !== false) activeOutput().write(text, "cua.browser");
       return tabBinding(tab);
+    },
+    async flowRun(flow, params = {}, options = {}) {
+      const { text } = await browser("flow_run", { flow, params, ...pick(options, { fields: "fields", where: "where", limit: "limit", maxChars: "max_chars" }) });
+      if (options.emit === true) activeOutput().write(text, "cua.browser");
+      const lines = text.split("\n").slice(1).filter((line) => !line.startsWith("Fell back after"));
+      try { return JSON.parse(lines.join("\n")); } catch { return lines.join("\n"); }
+    },
+    async flows(options = {}) {
+      const { text } = await browser("flow_list", pick(options, { url: "url" }));
+      if (options.emit !== false) activeOutput().write(text, "cua.browser");
+      return text;
     },
     async tabs(options = {}) {
       const { text } = await browser("tabs", pick(options, { profile: "profile" }));

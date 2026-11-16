@@ -39,6 +39,10 @@ final class BrowserBridge: @unchecked Sendable {
         var currentTab: Int?
         var keep: [Int: String] = [:]
         var snapshots: [Int: [String]] = [:]
+        /// Per tab, the actions a saved flow can replay, oldest first.
+        var flowSteps: [Int: [RecordedFlowStep]] = [:]
+        /// Per site, the background tab flow runs fetch from.
+        var flowTabs: [String: Int] = [:]
     }
 
     static func sessionID(_ owner: Int = SessionOwner.current) -> String {

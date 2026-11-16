@@ -253,7 +253,7 @@ public enum ToolDefinitions {
         ),
         ToolDefinition(
             name: "browser",
-            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab, in the profile that fits the task) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. For prices and stock, try extract (structured product data) or requests (the site's own API responses) before reading the layout. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
+            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab, in the profile that fits the task) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. For prices and stock, try extract (structured product data) or requests (the site's own API responses) before reading the layout. A task you will repeat (a price check for other products) can be saved after doing it once with flow_save, then run with flow_run and new params; flows are experimental, so continue in the page if a run fails. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
@@ -294,6 +294,13 @@ public enum ToolDefinitions {
                     "filter": stringProperty(description: "requests: URL substring or regex"),
                     "type": stringProperty(description: "requests: resource types, comma-separated (xhr, fetch, document, script, image, …) or all; default documents, XHR, fetch and JSON of the current page"),
                     "request": stringProperty(description: "requests: an id such as r12, to read that response's body"),
+                    "flow": stringProperty(description: "flow_save, flow_run: the saved flow's name (site/name when several sites share it)"),
+                    "params": ["type": "object", "description": "flow_save: param name to the example value the recording used; flow_run: param name to value"],
+                    "output": stringProperty(description: "flow_save: the request id (r12) that answers the task, or extract for the page's product data; default: the JSON response that used a param"),
+                    "description": stringProperty(description: "flow_save: what the flow answers"),
+                    "fields": stringProperty(description: "flow_run: comma-separated field paths to keep (price,stock.qty)"),
+                    "where": stringProperty(description: "flow_run: field=value filters over the answer's list (case-insensitive substring)"),
+                    "limit": integerProperty(description: "flow_run: at most this many list items"),
                     "max_chars": integerProperty(description: "Size budget for snapshots, extract and response bodies (default 6000, bodies 8000)"),
                     "state": stringProperty(description: "diff (default) returns changes; full the whole snapshot; none just ok", enumValues: ["diff", "full", "none"]),
                     "wait_for": stringProperty(description: "Text to wait for on the page; \"!text\" waits until it is gone"),

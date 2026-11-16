@@ -11,6 +11,7 @@ const MAX_USER_TABS = 500;
 const SESSION_GROUP_TITLE = "OCU";
 const DELIVERABLE_GROUP_TITLE = "OCU ✓";
 const NETWORK_LOG_LIMIT = 400;
+const ATTACH_SETTLE_MS = 1500;
 const NETWORK_BODY_TYPES = new Set(["Document", "XHR", "Fetch"]);
 // Streams never finish; a request this old no longer counts as loading (long polls).
 const NETWORK_IDLE_IGNORE_MS = 10_000;
@@ -202,11 +203,11 @@ class BrowserBackend {
   async createTab(params) {
     const session = await this.requireSession(params);
     const url = typeof params.url === "string" && params.url ? params.url : "about:blank";
-    // Attached before the first navigation, so the page load itself is in the network log.
-    const tab = await createBackgroundTab("about:blank");
+    // Attached as the page starts loading, so its requests are in the network log. Attaching to a tab
+    // Chrome has not given a renderer yet (a fresh about:blank) stalls the debugger session.
+    const tab = await createBackgroundTab(url);
     await this.ensureSessionGroup(session.sessionId, tab.id, "agent");
     await this.attachTab(tab.id).catch(() => {});
-    if (url !== "about:blank") await chrome.tabs.update(tab.id, { url });
     return toBrowserTab(tab);
   }
 
@@ -544,7 +545,8 @@ class BrowserBackend {
           main,
           navigation: log.navigation,
           redirectedFrom: entry && params.redirectResponse ? entry.id : undefined,
-          postData: typeof params.request?.postData === "string" ? params.request.postData.slice(0, 2000) : undefined,
+          postData: typeof params.request?.postData === "string" ? params.request.postData.slice(0, 20_000) : undefined,
+          headers: replayableHeaders(params.request?.headers),
           startedAt: now
         };
         log.byRequestId.set(params.requestId, next);
@@ -582,6 +584,7 @@ class BrowserBackend {
     return {
       attached: this.attachedTabs.has(params.tabId),
       navigation: log.navigation,
+      lastId: log.nextId - 1,
       loading,
       quietMs: now - log.lastEventAt,
       entries: log.entries.filter((entry) => entry.id > after).map((entry) => ({ ...entry, hasBody: NETWORK_BODY_TYPES.has(entry.type) }))
@@ -698,11 +701,17 @@ class BrowserBackend {
     }
     this.attachedTabs.add(tabId);
     // Dialog events need the Page domain; a background tab otherwise reports no focus.
-    await chrome.debugger.sendCommand({ tabId }, "Page.enable").catch(() => {});
-    await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
-    await chrome.debugger.sendCommand({ tabId }, "Network.enable", { maxTotalBufferSize: 50_000_000, maxResourceBufferSize: 10_000_000 }).catch(() => {});
-    const tree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => null);
-    if (tree?.frameTree?.frame?.id) this.networkLogFor(tabId).mainFrameId = tree.frameTree.frame.id;
+    const ready = Promise.all([
+      chrome.debugger.sendCommand({ tabId }, "Page.enable").catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Network.enable", { maxTotalBufferSize: 50_000_000, maxResourceBufferSize: 10_000_000 }).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").then((tree) => {
+        if (tree?.frameTree?.frame?.id) this.networkLogFor(tabId).mainFrameId = tree.frameTree.frame.id;
+      }).catch(() => {})
+    ]);
+    // A background tab Chrome has not given a renderer yet answers only once it has one; the
+    // commands still apply then, so waiting longer would only hold up the navigation that creates it.
+    await Promise.race([ready, new Promise((resolve) => setTimeout(resolve, ATTACH_SETTLE_MS))]);
   }
 
   async detachMany(tabIds) {
@@ -721,6 +730,19 @@ class BrowserBackend {
       }
     }
   }
+}
+
+// Headers a saved flow may send again: never cookies, credentials, CSRF or per-request signatures.
+function replayableHeaders(headers) {
+  if (!headers || typeof headers !== "object") return undefined;
+  const kept = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (key.startsWith(":") || /^(cookie|authorization|proxy-authorization|host|content-length|origin|referer|user-agent|sec-|accept-encoding|connection)/.test(key)) continue;
+    if (/(token|auth|csrf|xsrf|secret|session|signature|sig$|nonce|hmac|api-?key|timestamp|^x-ts$)/.test(key)) continue;
+    if (typeof value === "string" && value.length <= 300) kept[key] = value;
+  }
+  return Object.keys(kept).length ? kept : undefined;
 }
 
 function hasTabId(tab) {
