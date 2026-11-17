@@ -35,7 +35,7 @@ final class MCPClient {
         _ = try request(method: "initialize", params: [
             "clientInfo": [
                 "name": "OpenComputerUseSmokeSuite",
-                "version": "1.1.2",
+                "version": "1.1.4",
             ],
             "capabilities": [:],
             "protocolVersion": "2025-03-26",
@@ -70,6 +70,10 @@ final class MCPClient {
         }
 
         return text
+    }
+
+    func endTurn() throws {
+        try notify(method: "notifications/turn-ended", params: [:])
     }
 
     func terminate() {
@@ -198,7 +202,7 @@ enum OpenComputerUseSmokeSuite {
         let tools = try client.listTools()
         let expectedTools: Set<String> = [
             "list_apps", "get_app_state", "query", "click", "perform_secondary_action",
-            "scroll", "drag", "type_text", "press_key", "set_value", "select_text",
+            "scroll", "drag", "type_text", "press_key", "set_value", "select_text", "batch",
         ]
         let toolNames = Set(tools.compactMap { $0["name"] as? String })
         guard tools.count == expectedTools.count, toolNames == expectedTools else {
@@ -233,6 +237,25 @@ enum OpenComputerUseSmokeSuite {
             "y": buttonFrame.midY,
         ])
         try expect(parseCounterValue(state) == initialCounter + 2, "coordinate click should increment the counter again")
+
+        print("4b. lean action results")
+        let diff = try client.callTool("click", arguments: [
+            "app": appName,
+            "element_index": index["fixture-increment"]!.index,
+            "state": "diff",
+        ])
+        try expect(diff.contains("~ ") && parseCounterValue(diff) == initialCounter + 3, "a diff result should report only the changed counter")
+        try expect(!diff.contains("fixture-window"), "a diff result should leave out unchanged elements")
+        let batch = try client.callTool("batch", arguments: [
+            "app": appName,
+            "steps": [
+                ["tool": "click", "element_index": index["fixture-increment"]!.index],
+                ["tool": "click", "element_index": index["fixture-increment"]!.index],
+            ],
+            "state": "full",
+        ])
+        try expect(batch.hasPrefix("Ran 2 steps.") && parseCounterValue(batch) == initialCounter + 5, "batch should run every step and report once")
+        state = batch
 
         print("5. perform_secondary_action")
         let windowIndex = index["fixture-window"]?.index ?? "0"
@@ -321,6 +344,19 @@ enum OpenComputerUseSmokeSuite {
         environment["OPEN_COMPUTER_USE_VISUAL_CURSOR"] = "1"
         environment["OPEN_COMPUTER_USE_VISUAL_CURSOR_OBSERVATION_FILE"] = observationURL.path
 
+        print("1a. one-shot call clicks without drawing the cursor")
+        let oneShot = Process()
+        oneShot.executableURL = serverURL
+        oneShot.arguments = ["call", "click", "--args", #"{"app":"\#(appName)","element_index":"1"}"#]
+        oneShot.environment = environment
+        let oneShotOutput = Pipe()
+        oneShot.standardOutput = oneShotOutput
+        try oneShot.run()
+        let oneShotText = String(decoding: oneShotOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        oneShot.waitUntilExit()
+        try expect(oneShot.terminationStatus == 0 && oneShotText.contains("Counter: 1"), "one-shot click should return fixture state")
+        try expect(!FileManager.default.fileExists(atPath: observationURL.path), "a one-shot call has no app to draw the cursor in")
+
         let client = try MCPClient(executableURL: serverURL, arguments: ["mcp"], environment: environment)
         defer {
             client.terminate()
@@ -356,12 +392,23 @@ enum OpenComputerUseSmokeSuite {
         try expect(distanceBetween(secondTip, secondResting) < 0.35, "idle cursor tip should keep resting anchor")
         try expect(abs(secondRotation - firstRotation) > 0.01, "idle cursor should keep a clearly visible tiny rotation wobble")
 
+        print("4. turn end cancels unfinished animation and permits the next turn")
+        _ = try client.callTool("click", arguments: ["app": appName, "element_index": "1"])
+        try client.endTurn()
+        _ = try waitForCursorObservation(at: observationURL, phase: "hidden", timeout: 1)
+        Thread.sleep(forTimeInterval: 0.3)
+        _ = try waitForCursorObservation(at: observationURL, phase: "hidden", timeout: 0.1)
+        _ = try client.callTool("click", arguments: ["app": appName, "element_index": "1"])
+        _ = try waitForCursorObservation(at: observationURL, phase: "idle")
+
         print("Cursor idle smoke completed.")
     }
 
     private static func smokeServerEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY"] = "1"
+        // The steps below read state out of each action's result.
+        environment["OPEN_COMPUTER_USE_ACTION_RESULT"] = "full"
         return environment
     }
 

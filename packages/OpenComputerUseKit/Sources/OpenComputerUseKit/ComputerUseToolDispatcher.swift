@@ -40,14 +40,168 @@ private func normalizedElementIndexNumber(_ value: Double) -> String? {
 public final class ComputerUseToolDispatcher {
     private let service: ComputerUseService
 
+    private lazy var browser = BrowserTool()
+
     public init(service: ComputerUseService = ComputerUseService()) {
         self.service = service
     }
 
+    static let actionTools: Set<String> = [
+        "click", "drag", "perform_secondary_action", "press_key", "scroll", "select_text", "set_value", "type_text",
+    ]
+
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        // Calls run on threads whose autorelease pool never drains (the stdio read loop, an
+        // app-agent connection), so without one per call every screenshot's bitmap and
+        // encoded data stayed alive for the whole session.
+        try autoreleasepool { SecretInput.redact(try callToolUnredacted(name: name, arguments: arguments)) }
+    }
+
+    private func callToolUnredacted(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        guard let app = arguments["app"] as? String, name == "batch" || name == "get_app_state" || Self.actionTools.contains(name) else {
+            return try callClaimed(name: name, arguments: arguments)
+        }
+        let result = try service.trackingOpenedWindows(app: app) { try callClaimed(name: name, arguments: arguments) }
+        guard name == "get_app_state", arguments["keep_window"] != nil else {
+            return result
+        }
+        guard let keep = arguments["keep_window"] as? NSNumber, CFGetTypeID(keep) == CFBooleanGetTypeID() else {
+            throw ComputerUseError.invalidArguments("keep_window must be a boolean")
+        }
+        guard keep.boolValue else { return result }
+        let note = service.keepCurrentWindow(app: app)
+            ? "This window stays open after you finish."
+            : "keep_window only applies to a window you opened; this one was already open and is never closed."
+        return ToolCallResult(content: result.content + [.text(note)], isError: result.isError)
+    }
+
+    private func callClaimed(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        let acts = name == "batch" || Self.actionTools.contains(name)
+        guard let app = arguments["app"] as? String, acts || name == "get_app_state",
+              let claim = service.leaseResource(for: app) else {
+            return try callUnclaimed(name: name, arguments: arguments)
+        }
+        let environment = RequestEnvironment.current
+        let wait = Self.seconds(environment["OPEN_COMPUTER_USE_LEASE_WAIT_SECONDS"], default: 30)
+        let idle = Self.seconds(environment["OPEN_COMPUTER_USE_LEASE_IDLE_SECONDS"], default: 120)
+        guard acts else {
+            // Reading never waits, but says when another agent is working there.
+            let result = try callUnclaimed(name: name, arguments: arguments)
+            guard let current = service.leaseResource(for: app),
+                  AgentLeases.shared.otherOwner(of: current.resource, session: SessionOwner.current, idleExpiry: idle) != nil else {
+                return result
+            }
+            return ToolCallResult(content: result.content + [.text(Self.busyNote(current))], isError: result.isError)
+        }
+        do {
+            return try AgentLeases.shared.perform(claim.resource, session: SessionOwner.current, wait: wait, idleExpiry: idle) {
+                let token = ForegroundGuard.shared.arm(targetPID: claim.resource.pid)
+                defer { ForegroundGuard.shared.disarm(token) }
+                return try callUnclaimed(name: name, arguments: arguments)
+            }
+        } catch is LeaseBusy {
+            throw ComputerUseError.stateUnavailable(Self.busyNote(claim) + " Waited \(Int(wait)) s.")
+        }
+    }
+
+    private static func busyNote(_ claim: (resource: LeasedResource, appName: String, singleton: Bool)) -> String {
+        if case .window = claim.resource {
+            return "Another agent is working in this \(claim.appName) window. Open your own window (e.g. click menu_path [\"File\", \"New window\"]) or pass get_app_state window_id for a free one."
+        }
+        return claim.singleton
+            ? "\(claim.appName) is in use by another agent; it has one main window, so agents take turns. Try again later."
+            : "\(claim.appName) is in use by another agent. Try again later."
+    }
+
+    private static func seconds(_ raw: String?, default value: TimeInterval) -> TimeInterval {
+        raw.flatMap(TimeInterval.init).flatMap { $0 >= 0 ? $0 : nil } ?? value
+    }
+
+    private func callUnclaimed(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        if name == "batch" {
+            return try callBatch(arguments: arguments)
+        }
+        guard Self.actionTools.contains(name) else {
+            return try callSingleTool(name: name, arguments: arguments)
+        }
+        return try service.withActionObservation(try actionObservation(in: arguments)) {
+            try callSingleTool(name: name, arguments: arguments)
+        }
+    }
+
+    private func callBatch(arguments: [String: Any]) throws -> ToolCallResult {
+        let app = try requireString("app", in: arguments)
+        guard let rawSteps = arguments["steps"] as? [Any], !rawSteps.isEmpty, rawSteps.count <= 50 else {
+            throw ComputerUseError.invalidArguments("steps must be an array of 1 to 50 actions")
+        }
+        let steps = try rawSteps.enumerated().map { offset, raw in
+            guard var step = raw as? [String: Any],
+                  let tool = step.removeValue(forKey: "tool") as? String,
+                  Self.actionTools.contains(tool)
+            else {
+                throw ComputerUseError.invalidArguments(
+                    "steps[\(offset)] needs tool set to one of \(Self.actionTools.sorted().joined(separator: ", "))"
+                )
+            }
+            if let stepApp = step["app"] as? String, stepApp != app {
+                throw ComputerUseError.invalidArguments("steps[\(offset)] targets \(stepApp); a batch acts on one app")
+            }
+            step["app"] = app
+            var observation = try actionObservation(in: step) ?? ActionObservation()
+            observation.state = .none
+            observation.screenshot = false
+            let arguments = step
+            let key = (step["key"] as? String)?.lowercased().replacingOccurrences(of: " ", with: "") ?? ""
+            let copies = tool == "press_key" && ["+c", "+x"].contains(where: key.hasSuffix) && ["super", "cmd", "command"].contains(where: key.contains)
+            return (tool: tool, observation: observation, copiesToClipboard: copies,
+                    run: { try self.callSingleTool(name: tool, arguments: arguments) })
+        }
+        return try service.withActionObservation(try actionObservation(in: arguments)) {
+            try service.runBatch(app: app, steps: steps)
+        }
+    }
+
+    /// Per-call result options layered over the process defaults; nil when the call sets none.
+    private func actionObservation(in arguments: [String: Any]) throws -> ActionObservation? {
+        let keys = ["state", "screenshot", "wait_for", "wait_timeout"]
+        guard keys.contains(where: { arguments[$0] != nil }) else {
+            return nil
+        }
+        var observation = service.actionObservation
+        if let raw = arguments["state"] {
+            guard let string = raw as? String, let state = ActionStateMode(rawValue: string) else {
+                throw ComputerUseError.invalidArguments("state must be one of diff, full, none")
+            }
+            observation.state = state
+        }
+        if let raw = arguments["screenshot"] {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw ComputerUseError.invalidArguments("screenshot must be a boolean")
+            }
+            observation.screenshot = number.boolValue
+        }
+        if let raw = arguments["wait_for"] {
+            guard let string = raw as? String, WaitCondition(string) != nil else {
+                throw ComputerUseError.invalidArguments("wait_for must be non-empty text")
+            }
+            observation.waitFor = string
+        }
+        if arguments["wait_timeout"] != nil {
+            guard let seconds = optionalDouble("wait_timeout", in: arguments), seconds > 0,
+                  seconds <= ActionObservation.maxWaitTimeout else {
+                throw ComputerUseError.invalidArguments("wait_timeout must be a number of seconds from 0 to 30")
+            }
+            observation.waitTimeout = seconds
+        }
+        return observation
+    }
+
+    private func callSingleTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         switch name {
         case "list_apps":
             return service.listApps()
+        case "browser":
+            return try browser.call(arguments)
         case "query":
             let matches = try service.query(
                 app: requireString("app", in: arguments),
@@ -71,8 +225,28 @@ public final class ComputerUseToolDispatcher {
                 observation: SnapshotObservationOptions(
                     includeAX: try strictObservationBool("include_ax", in: arguments),
                     includeScreenshot: try strictObservationBool("include_screenshot", in: arguments)
-                )
+                ),
+                windowID: try validatedQueryWindowID(arguments["window_id"]),
+                autoScreenshot: arguments["include_screenshot"] == nil
+                    && RequestEnvironment.current["OPEN_COMPUTER_USE_STATE_SCREENSHOT"] != "always"
             )
+        case "click" where arguments["menu_item"] != nil:
+            guard let item = arguments["menu_item"] as? String, let elementIndex = optionalElementIndex(in: arguments) else {
+                throw ComputerUseError.invalidArguments("menu_item needs element_index: it picks an item from that element's context menu")
+            }
+            return try service.chooseContextMenuItem(app: requireString("app", in: arguments), elementIndex: elementIndex, item: item)
+        case "click" where arguments["menu_path"] != nil:
+            guard let path = arguments["menu_path"] as? [String], arguments["element_index"] == nil, arguments["x"] == nil else {
+                throw ComputerUseError.invalidArguments("menu_path must be an array of menu titles, used without element_index or x/y")
+            }
+            return try service.pressMenuItem(app: requireString("app", in: arguments), path: path)
+        case "click" where arguments["hold"] != nil, "press_key" where arguments["hold"] != nil:
+            guard let hold = optionalDouble("hold", in: arguments), hold > 0, hold <= 10 else {
+                throw ComputerUseError.invalidArguments("hold must be seconds from 0 to 10")
+            }
+            var released = arguments
+            released["hold"] = nil
+            return try InputHold.with(hold) { try callSingleTool(name: name, arguments: released) }
         case "click":
             return try service.click(
                 app: requireString("app", in: arguments),
@@ -89,6 +263,14 @@ public final class ComputerUseToolDispatcher {
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
                 action: requireString("action", in: arguments)
+            )
+        case "scroll" where arguments["element_index"] == nil && arguments["x"] != nil:
+            return try service.scroll(
+                app: requireString("app", in: arguments),
+                direction: requireString("direction", in: arguments),
+                x: requireDouble("x", in: arguments),
+                y: requireDouble("y", in: arguments),
+                pages: optionalDouble("pages", in: arguments) ?? 1
             )
         case "scroll":
             return try service.scroll(
@@ -108,10 +290,20 @@ public final class ComputerUseToolDispatcher {
                 via: try optionalPointArray("path", in: arguments),
                 modifiers: try parseMouseModifiers(optionalStringArray("modifiers", in: arguments))
             )
+        case "type_text" where arguments["paste"] as? Bool == true:
+            guard arguments[SecretInput.argumentKey] == nil else {
+                throw ComputerUseError.invalidArguments("secret_env cannot be pasted: a clipboard manager could keep it. Type it instead.")
+            }
+            return try service.paste(
+                app: requireString("app", in: arguments),
+                text: try requireString("text", in: arguments),
+                format: optionalString("format", in: arguments) ?? "text",
+                keyMethod: try parseKeyMethod(optionalString("key_method", in: arguments))
+            )
         case "type_text":
             return try service.typeText(
                 app: requireString("app", in: arguments),
-                text: requireString("text", in: arguments),
+                text: try textOrSecret("text", in: arguments),
                 keyMethod: try parseKeyMethod(optionalString("key_method", in: arguments))
             )
         case "press_key":
@@ -124,7 +316,7 @@ public final class ComputerUseToolDispatcher {
             return try service.setValue(
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
-                value: requireString("value", in: arguments)
+                value: try textOrSecret("value", in: arguments, allowEmpty: true)
             )
         case "select_text":
             return try service.selectText(
@@ -145,17 +337,31 @@ public final class ComputerUseToolDispatcher {
             return try callTool(name: name, arguments: arguments)
         } catch let error as ComputerUseError {
             return ToolCallResult.text(
-                error.errorDescription ?? String(describing: error),
+                SecretInput.redact(error.errorDescription ?? String(describing: error)),
                 isError: error.toolResultIsError
             )
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            return ToolCallResult.text(message, isError: true)
+            return ToolCallResult.text(SecretInput.redact(message), isError: true)
         }
     }
 
-    private func requireString(_ key: String, in arguments: [String: Any]) throws -> String {
-        guard let value = arguments[key] as? String, !value.isEmpty else {
+    /// Literal text, or the value of the environment variable named by `secret_env`.
+    private func textOrSecret(_ key: String, in arguments: [String: Any], allowEmpty: Bool = false) throws -> String {
+        guard let raw = arguments[SecretInput.argumentKey] else {
+            return try requireString(key, in: arguments, allowEmpty: allowEmpty)
+        }
+        guard arguments[key] == nil else {
+            throw ComputerUseError.invalidArguments("pass either \(key) or secret_env, not both")
+        }
+        guard let name = raw as? String else {
+            throw ComputerUseError.invalidArguments("secret_env must be an environment variable name")
+        }
+        return try SecretInput.resolve(name)
+    }
+
+    private func requireString(_ key: String, in arguments: [String: Any], allowEmpty: Bool = false) throws -> String {
+        guard let value = arguments[key] as? String, allowEmpty || !value.isEmpty else {
             throw ComputerUseError.missingArgument(key)
         }
 

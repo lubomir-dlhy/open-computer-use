@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { JsonLinePeer, PersistentJavaScriptSession, WorkerJavaScriptSession, parseListApps, toolDefinitions } from "./open-computer-use-repl.mjs";
+import { JsonLinePeer, PersistentJavaScriptSession, WorkerJavaScriptSession, parseListApps, toolDefinitions, computerUseGuidance, virtualDisplayEnabled } from "./open-computer-use-repl.mjs";
 
 function textResult(text, isError = false, image) {
   const content = [{ type: "text", text }];
@@ -138,7 +138,14 @@ for (const Session of [PersistentJavaScriptSession, WorkerJavaScriptSession]) {
   });
 }
 
-test("app-bound API forwards background-operation options", async () => {
+test("app-bound API forwards explicitly enabled background-operation options", async t => {
+  const previous = process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED;
+  process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED = "true";
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED;
+    else process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED = previous;
+  });
+  if (process.platform !== "darwin") { t.skip("virtual displays are macOS-only"); return; }
   const native = mockNative();
   const session = new PersistentJavaScriptSession({ native });
   const result = await session.run(`
@@ -433,3 +440,119 @@ for (const Session of [PersistentJavaScriptSession, WorkerJavaScriptSession]) {
     }
   });
 }
+
+test("actions return their result unshown and forward native options", async () => {
+  const native = mockNative();
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var parityApp = await cua.getApp("Text", { initialState: false });
+    var clicked = await parityApp.click(3, { menuItem: "Archive", waitFor: "Done", state: "none" });
+    await parityApp.menu(["File", "New window"]);
+    await parityApp.typeText(null, { secretEnv: "APP_PASSWORD" });
+    await parityApp.paste("**hi**", { format: "markdown" });
+    await parityApp.scroll([10, 20], "down", 2);
+    await parityApp.pressKey("a", { hold: 0.5 });
+    await parityApp.batch([{ tool: "click", element_index: "1" }]);
+    await parityApp.getAXState({ emit: false, windowId: 77 });
+    nodeRepl.write("got " + clicked);
+  `);
+  assert.equal(result.isError, false);
+  assert.equal(result.content.at(-1).text, "got clicked");
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))), [
+    { app: "Text", element_index: 3, menu_item: "Archive", wait_for: "Done", state: "none" },
+    { app: "Text", menu_path: ["File", "New window"] },
+    { app: "Text", secret_env: "APP_PASSWORD" },
+    { app: "Text", text: "**hi**", paste: true, format: "markdown" },
+    { app: "Text", x: 10, y: 20, direction: "down", pages: 2 },
+    { app: "Text", key: "a", hold: 0.5 },
+    { app: "Text", steps: [{ tool: "click", element_index: "1" }] },
+    { app: "Text", window_id: 77 },
+  ]);
+});
+
+test("cua.browser binds a tab and maps targets", async () => {
+  const native = mockNative();
+  native.request = async (method, params) => {
+    native.calls.push(params);
+    const action = params.arguments.action;
+    if (action === "open") return textResult("Tab 42 opened in the background.\npage");
+    if (action === "evaluate") return textResult('{"a":1}');
+    return textResult(`did ${action}`);
+  };
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var tab = await cua.browser.open("https://example.test", { emit: false });
+    await tab.click(5);
+    await tab.type("#name", "Ada", { clear: true });
+    await tab.drag({ name: "A" }, "#b");
+    var value = await tab.evaluate("1");
+    nodeRepl.write(String(tab.id) + " " + value.a);
+  `);
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content.map(item => item.text), ["42 1"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))), [
+    { action: "open", url: "https://example.test" },
+    { action: "click", tab: 42, ref: 5 },
+    { action: "type", tab: 42, selector: "#name", text: "Ada", clear: true },
+    { action: "drag", tab: 42, name: "A", to_selector: "#b" },
+    { action: "evaluate", tab: 42, expression: "1" },
+  ]);
+});
+
+
+test("virtual display guidance follows explicit host configuration", () => {
+  const env = { OPEN_COMPUTER_USE_CONFIG_FILE: "/nonexistent/ocu-test-config.json" };
+  assert.equal(virtualDisplayEnabled(env, "darwin"), false);
+  assert.doesNotMatch(computerUseGuidance(env, "darwin"), /windowPlacement/);
+  const enabled = { ...env, OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED: "true" };
+  assert.match(computerUseGuidance(enabled, "darwin"), /windowPlacement/);
+  assert.equal(virtualDisplayEnabled({ ...enabled, OPEN_COMPUTER_USE_CONFIG_FILE: "relative" }, "darwin"), true);
+  assert.equal(virtualDisplayEnabled({ ...enabled, OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED: "1" }, "darwin"), false);
+  assert.doesNotMatch(computerUseGuidance(enabled, "linux"), /windowPlacement/);
+  assert.doesNotMatch(computerUseGuidance(enabled, "win32"), /windowPlacement/);
+});
+
+test("disabled virtual displays reject stale JS options before native dispatch", async t => {
+  const previous = process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED;
+  process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED = "false";
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED;
+    else process.env.OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED = previous;
+  });
+  const native = mockNative();
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var app = await cua.getApp("Text", { initialState: false });
+    await app.getAXState({ windowPlacement: "agent_display" });
+  `);
+  assert.equal(result.isError, true);
+  assert.match(result.content.at(-1).text, /disabled by virtualDisplay.enabled/);
+  assert.equal(native.calls.length, 0);
+  const restored = await session.run('await app.getAXState({ windowPlacement: "restore", emit: false });');
+  assert.equal(restored.isError, false);
+  assert.equal(native.calls.at(-1).arguments.window_placement, "restore");
+});
+
+test("cua.browser saves and runs flows and parses their answers", async () => {
+  const native = mockNative();
+  native.request = async (method, params) => {
+    native.calls.push(params);
+    const action = params.arguments.action;
+    if (action === "open") return textResult("Tab 7 opened in the background.\npage");
+    if (action === "flow_run") return textResult('Flow shop.test/stock via page: HTTP 200\nFell back after replay: x.\n{"quantity":3}');
+    return textResult(`did ${action}`);
+  };
+  const session = new PersistentJavaScriptSession({ native });
+  const result = await session.run(`
+    var tab = await cua.browser.open("https://shop.test/p?sku=A", { emit: false });
+    await tab.flowSave("stock", { params: { sku: "A" }, output: "r3" });
+    var answer = await cua.browser.flowRun("stock", { sku: "B" }, { fields: "quantity", limit: 2 });
+    nodeRepl.write(String(answer.quantity));
+  `);
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content.map(item => item.text), ["3"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(native.calls.map(call => call.arguments))).slice(1), [
+    { action: "flow_save", tab: 7, flow: "stock", params: { sku: "A" }, output: "r3" },
+    { action: "flow_run", flow: "stock", params: { sku: "B" }, fields: "quantity", limit: 2 },
+  ]);
+});

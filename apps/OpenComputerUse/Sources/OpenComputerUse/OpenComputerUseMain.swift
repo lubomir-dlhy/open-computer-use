@@ -26,6 +26,21 @@ enum OpenComputerUseMain {
     private static func run() throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
 
+        // Chrome starts the native host with the extension origin as its argument.
+        if BrowserNativeHost.isInvocation(arguments: arguments) {
+            BrowserNativeHost.run()
+        }
+        if arguments.first == "browser-setup" {
+            let source = arguments.dropFirst().first.map { URL(fileURLWithPath: $0) }
+                ?? Bundle.main.resourceURL?.appendingPathComponent("BrowserExtension")
+            let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+            print(try BrowserNativeHost.setup(
+                executable: executable.resolvingSymlinksInPath(),
+                extensionSource: source.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+            ))
+            return
+        }
+
         if MacOSAppAgentProxy.isAgentInvocation(arguments: arguments) {
             try MacOSAppAgentProxy.runAgent(arguments: arguments)
             return
@@ -69,9 +84,8 @@ enum OpenComputerUseMain {
             let service = ComputerUseService()
             print(try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits, observation: observation).textContent)
         case let .call(invocation):
-            if VisualCursorSupport.isEnabled {
-                _ = NSApplication.shared.setActivationPolicy(.accessory)
-            }
+            // No NSApplication here, so no drawn cursor: it would vanish with this
+            // process, and playing it inline held every click for its glide.
             let output = try runOpenComputerUseCall(invocation)
             print(try output.jsonText())
             if output.hasToolError {

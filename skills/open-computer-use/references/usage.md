@@ -40,6 +40,7 @@ type_text
 press_key
 set_value
 select_text   (macOS runtime only)
+batch         (macOS runtime only)
 ```
 
 macOS also exposes `query` for targeted AX lookup. These nine core tools remain the cross-platform compatibility surface. The bundled Codex plugin uses a
@@ -110,6 +111,36 @@ The native `ocu mcp` surface exposes the nine core tools above, plus `query` on 
 `ocu capabilities --json` to inspect component availability instead of
 inferring support from a command being present in help.
 
+## Action Results (macOS)
+
+macOS actions return only what changed since the state the agent last saw. `~` is a changed element, `+` an added one (`(in N)` names the parent), and `-` a removed subtree. Element indices the agent already has stay valid until the next `get_app_state`, which renumbers the tree. Each action and `batch` also accept:
+
+- `state`: `diff` (default), `full` (the whole tree, the old result) or `none` (`ok`).
+- `screenshot: true` to attach a screenshot. Off by default; call `get_app_state` when you need one.
+- `wait_for: "text"` to return once the text is in the tree; `"!text"` waits until it is gone. `wait_timeout` is in seconds, default 5.
+
+`batch` runs several steps on one app in one call: `{"app": "TextEdit", "steps": [{"tool": "click", "element_index": "4"}, {"tool": "type_text", "text": "Hi"}]}`. Every step's indices refer to the state before the batch, and it stops at the first failing step.
+
+`OPEN_COMPUTER_USE_ACTION_RESULT=full` in the server environment restores the previous results (whole tree plus screenshot). See `docs/lean-action-results.md` in the repository.
+
+`get_app_state` attaches a screenshot only the first time you see a window, or when its tree is too thin to act on; pass `include_screenshot: true` for one. `scroll` also takes `x`/`y`, `click` and `press_key` take `hold` (seconds), and `type_text` with `paste: true` pastes `text`, `html` or `markdown` (`format`) and restores the user's clipboard.
+
+## Chrome (`browser` tool)
+
+Needs the Open Computer Use Browser extension (`open-computer-use browser-setup`, then Load unpacked in `chrome://extensions`). Everything runs in background tabs through Chrome's debugger: Chrome is never activated and the user's visible tab never changes.
+
+- Pick the Chrome profile that owns the task's account with `profile` (name or email; the parameter description lists the profiles, their notes and the default). Work for an organisation goes in its profile; personal tasks in the default. `profile` matters only for `open` and `tabs`: later calls follow the tab.
+- `{"action": "open", "url": "https://…", "profile": "…"}` opens a background tab and returns a snapshot: `[ref] role "name" state` lines plus visible text. Later calls default to that tab (`tab` picks another).
+- Target elements by `ref`, `selector` or `name` (visible text); `x`/`y` are viewport CSS pixels.
+- `click` (`click_count`, `button`, `modifiers`, `hold`, `force`), `hover`, `type` (`text` or `secret_env`, `clear`, `format`), `key` (`Enter`, `cmd+a`, …), `scroll` (`direction`, `amount`), `select` (native `<select>`), `drag` (`to_ref`/`to_selector`/`to_name`/`to_x`+`to_y`; HTML5 drag-and-drop works), `upload` (`files`), `download`, `evaluate` (`expression`).
+- Unnamed or repeated controls carry `hint="icon trash"`, `hint="testid …"` or `hint="in \"row text\""`; use them before reaching for a screenshot.
+- Prices, stock and other data: `{"action": "extract"}` gives one line per product (price, currency, availability, SKU) from the page's structured data, plus embedded JSON (`selector: "script#__NEXT_DATA__"` reads it). `{"action": "requests"}` lists the page's own API calls (`filter`, `type`); `request: "r12"` returns a response body. `snapshot` with `find: "in stock|€"` returns only matching lines; with `ref`, only that element's part of the page. Try these before reading the whole page or taking a screenshot.
+- Repeated tasks (the same check for other products): after doing it once, `{"action": "flow_save", "flow": "stock", "params": {"sku": "TS-42"}}` saves it (the example value as typed or in a URL; `output` picks `r12` or `extract`); `{"action": "flow_run", "flow": "stock", "params": {"sku": "TS-43"}}` answers without driving the page, with `fields`, `where`, `limit` to trim a list. Flows only save reads. Experimental: if a run fails or says the site changed, do the task in the page and save again. `flow_list` lists them; `open` mentions a site's flows.
+- Navigation results start with `HTTP <status>` (and redirects); a `Bot check:` line means the page is a challenge, not the site. `wait` with `load: "networkidle"` waits for late prices and stock.
+- Results are diffs against the last snapshot; a navigation returns the new page. `wait_for` / `wait_timeout` work as in native actions; `wait` also takes `url`, `load` and `selector`.
+- A JS dialog is reported by the next action; answer with `{"action": "dialog", "accept": true}` (`text` for a prompt).
+- Tabs you open close at the end of the turn. `{"action": "keep"}` keeps the current tab (`status: "handoff"` to continue later). `tabs` lists yours and the user's; `claim` takes one of the user's tabs, released at the end of the turn. `show` brings a tab forward only when the user wants to watch.
+
 ## Direct CLI Tool Calls
 
 Use `call` for one-off checks:
@@ -120,6 +151,13 @@ ocu call list_apps
 open-computer-use call get_app_state --args '{"app":"TextEdit"}'
 open-computer-use call set_value --args '{"app":"TextEdit","element_index":"1","value":"Draft"}'
 ```
+
+`set_value` verifies the actual value on macOS, Windows and Linux, including when
+full action read-back is disabled. Text is exact: whitespace, case and leading
+zeros matter; `""` clears the field. Numeric/boolean comparison is used only for
+native attributes of that type. Verification polls for up to 0.6 seconds without
+repeating the write. If it fails, observe the control before deciding to retry:
+the write may already have changed it.
 
 Use `--calls` for short action sequences that need to reuse the same process state:
 
@@ -242,6 +280,15 @@ open-computer-use call --calls '[
 ]'
 ```
 
+Virtual displays are disabled by default. The host must explicitly set
+`virtualDisplay.enabled=true` with `ocu config`, or
+`OPEN_COMPUTER_USE_VIRTUAL_DISPLAY_ENABLED=true`, before using the examples above.
+While disabled, MCP omits `window_placement`, JS guidance omits `windowPlacement`,
+and stale `agent_display` calls fail before creating a display. The agent must not
+enable this setting on the user's behalf without their request: it adds a system
+monitor and can change the user's display arrangement. Existing `restore` and
+turn/connection cleanup remain available when disabled.
+
 `agent_display` moves the window's frame onto a virtual display the user never sees (macOS only): the app renders it, exposes its full tree and accepts `sky_click` / `sky_key`, while the user's Space, focus and pointer stay untouched. The window is gone from the user's desktop until `restore`, the assistant turn ends, the MCP/REPL connection closes, or the runtime exits, so treat it as a deliberate, temporary step. `restore` restores every window parked by the runtime for that app. Keep park/action/restore calls in one `js`, REPL, MCP, or `call --calls` session; a one-shot CLI connection restores its background state when it closes. `sky_click` and `sky_key` accept covered and other-Space windows.
 
 Apps stop listing a window in `AXWindows` once it is on another Space. On macOS, `query` with a `window_id` (and `get_app_state` when the app reports no usable focused window) still finds such a window if the app ever exposed it to accessibility, by addressing its elements directly. A window that has never been on the user's current Space since the app launched has no accessibility element yet and stays unreachable; ask the user to show it once.
@@ -306,8 +353,19 @@ AX window element is preferred; `CGWindowListCopyWindowInfo` is used only when n
 because it can report an old origin after a move. A failed read keeps the last usable frame. Tracking is
 released when the cursor is cleared or its idle timeout expires.
 
+Cursor animations play while the action runs instead of before it, so they add no latency.
+`OPEN_COMPUTER_USE_VISUAL_CURSOR_BLOCKING=1` makes each action wait for its animation, as before.
+
 This follows the window's position, not layout changes inside it. Refresh app state after a layout change
 before choosing another target. Input delivery continues to use the existing action paths.
+
+The tool call does not wait for the cursor animation: the action returns while the cursor finishes its
+travel and click feedback. Back-to-back actions play faster, down to 15% of the normal length
+(`OPEN_COMPUTER_USE_CURSOR_BURST_FLOOR`; a finite positive number, capped at `1`, which turns this off; invalid values use `0.15`), and return to normal after 2 s without
+actions. Window screenshots never include the cursor. A one-shot `open-computer-use call` draws no
+cursor: it would disappear when the process exits. The MCP server and the app agent draw it.
+Turn end or session cleanup cancels unfinished and queued cursor animations; old animations cannot
+show the cursor again after cleanup.
 
 ## Platform Notes
 

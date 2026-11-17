@@ -120,19 +120,19 @@ enum MacOSAppAgentProxy {
     }
 
     private static func proxyMCP(client: AppAgentSocketClient) throws {
-        while let line = readLine(strippingNewline: true) {
-            guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
-            }
+        let requests = MCPStdinRequests()
+        while let request = requests.next() {
+            // No run loop drains this thread's autorelease pool either: one per request.
+            try autoreleasepool {
+                let response = try client.request([
+                    "kind": "mcp",
+                    "line": request.line,
+                    "environment": proxiedEnvironment(secretsReferencedBy: request.line),
+                ])
 
-            let response = try client.request([
-                "kind": "mcp",
-                "line": line,
-                "environment": proxiedEnvironment(),
-            ])
-
-            if let responseLine = response["response"] as? String {
-                FileHandle.standardOutput.write(Data((responseLine + "\n").utf8))
+                if requests.finish(), let responseLine = response["response"] as? String {
+                    FileHandle.standardOutput.write(Data((responseLine + "\n").utf8))
+                }
             }
         }
     }
@@ -140,7 +140,7 @@ enum MacOSAppAgentProxy {
     private static func sendCLIRequest(arguments: [String], client: AppAgentSocketClient) throws -> CLIProxyResponse {
         let response = try client.request([
             "kind": "cli",
-            "arguments": arguments,
+            "arguments": resolvingOpenComputerUseCallFilePaths(arguments),
             "environment": proxiedEnvironment(),
         ])
 
@@ -151,9 +151,18 @@ enum MacOSAppAgentProxy {
         )
     }
 
-    private static func proxiedEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment.filter { key, _ in
+    private static func proxiedEnvironment(secretsReferencedBy line: String? = nil) -> [String: String] {
+        let processEnvironment = ProcessInfo.processInfo.environment
+        var environment = processEnvironment.filter { key, _ in
             key.hasPrefix("OPEN_COMPUTER_USE_")
+        }
+        // A secret reaches the agent only for the call that names it.
+        if let line, line.contains(SecretInput.argumentKey),
+           let payload = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+            for name in SecretInput.referencedNames(in: payload["params"] ?? [:])
+            where SecretInput.isAllowed(name, environment: processEnvironment) {
+                environment[name] = processEnvironment[name]
+            }
         }
         if let url = try? OCUConfiguration.fileURL(environment: OCUConfiguration.environment) {
             environment["OPEN_COMPUTER_USE_CONFIG_FILE"] = url.path
@@ -191,14 +200,15 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
         turnEndedObserver = DistributedNotificationCenter.default().addObserver(
             forName: openComputerUseTurnEndedNotificationName,
             object: nil,
-            queue: .main
+            queue: nil
         ) { notification in
             let sender = decodeProcessAncestry(notification.object as? String)
+            // Invalidate animations before waiting for main-actor cleanup.
+            resetOpenComputerUseVisualCursor()
             Task { @MainActor in
                 for session in turnEndedRecipients(senderAncestry: sender, sessionAncestries: AppAgentSessions.ancestries) {
                     resetOpenComputerUseTurnState(session: session)
                 }
-                resetOpenComputerUseVisualCursor()
             }
         }
 
@@ -330,7 +340,9 @@ private final class AppAgentConnection: @unchecked Sendable {
         AppAgentSessions.register(server.sessionID, peer: fileDescriptor)
         let monitorQueue = DispatchQueue(label: "ocu.client-disconnect")
         let monitor = DispatchSource.makeTimerSource(queue: monitorQueue)
-        monitor.schedule(deadline: .now(), repeating: .milliseconds(100))
+        // Polls only while a request runs (rescheduled below): between requests the blocking
+        // read sees the hang-up itself, and an idle client cost 10 wakeups a second.
+        monitor.schedule(deadline: .distantFuture)
         monitor.setEventHandler { [self] in
             var byte: UInt8 = 0
             let count = recv(fileDescriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
@@ -350,8 +362,15 @@ private final class AppAgentConnection: @unchecked Sendable {
         }
 
         while let line = readAgentLine(file) {
-            let response = handle(requestLine: line)
-            writeAgentLine(response, to: file)
+            // A pool per request: this thread's own drains only when the client disconnects.
+            autoreleasepool {
+                monitor.schedule(deadline: .now(), repeating: .milliseconds(100))
+                let response = handle(requestLine: line)
+                writeAgentLine(response, to: file)
+                // A slow reader can also block the response write. Keep disconnect
+                // monitoring active until the whole exchange has finished.
+                monitor.schedule(deadline: .distantFuture)
+            }
         }
     }
 
@@ -573,32 +592,15 @@ private enum AppAgentSessions {
 }
 
 private enum AppAgentEnvironment {
-    private static let lock = NSLock()
-
+    /// Runs one request with the caller's OPEN_COMPUTER_USE_* settings. They live
+    /// with the serving thread, not the process, so clients can be served at once.
     static func withOverrides<T>(_ overrides: [String: String], _ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let keys = Set(overrides.keys).union(OCUConfiguration.environmentKeys)
-        let previousValues = Dictionary(uniqueKeysWithValues: keys.map { key in
-            (key, getenv(key).map { String(cString: $0) })
-        })
-        for key in OCUConfiguration.environmentKeys where overrides[key] == nil { unsetenv(key) }
-        for (key, value) in overrides {
-            setenv(key, value, 1)
+        var environment = ProcessInfo.processInfo.environment
+        for key in OCUConfiguration.environmentKeys where overrides[key] == nil {
+            environment.removeValue(forKey: key)
         }
-
-        defer {
-            for (key, previousValue) in previousValues {
-                if let previousValue {
-                    setenv(key, previousValue, 1)
-                } else {
-                    unsetenv(key)
-                }
-            }
-        }
-
-        return try body()
+        environment.merge(overrides) { _, override in override }
+        return try RequestEnvironment.with(environment, body)
     }
 }
 

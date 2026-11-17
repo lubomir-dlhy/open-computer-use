@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCU Bench Page</title>
+<style>body{font:14px system-ui;margin:16px} nav a{margin-right:6px} li{margin:2px 0}</style></head><body>
+<nav id="nav"></nav>
+<h1>OCU bench todo</h1>
+<form id="f" onsubmit="add();return false"><label>New todo <input id="todo" placeholder="What needs doing?"></label>
+<button type="submit">Add</button> <button type="button" onclick="document.getElementById('details').hidden=!document.getElementById('details').hidden">Toggle details</button></form>
+<section id="details" hidden><h2>Details panel</h2><p>Loaded asynchronously.</p><button>Close details</button></section>
+<ul id="list"></ul>
+<footer id="foot"></footer>
+<script>
+const nav=document.getElementById('nav');for(let i=1;i<=40;i++){const a=document.createElement('a');a.href='#s'+i;a.textContent='Section '+i;nav.appendChild(a)}
+const list=document.getElementById('list');
+function item(t){const li=document.createElement('li');li.innerHTML='<input type="checkbox"> <span></span> <button>Delete</button>';li.querySelector('span').textContent=t;li.querySelector('button').onclick=()=>li.remove();list.appendChild(li)}
+for(let i=1;i<=25;i++)item('Existing task number '+i);
+function add(){const v=document.getElementById('todo');if(v.value){setTimeout(()=>{item(v.value);v.value=''},150)}}
+const foot=document.getElementById('foot');for(let i=1;i<=30;i++){const p=document.createElement('p');p.textContent='Footer paragraph '+i+' with some filler text to make the page look like a real site.';foot.appendChild(p)}
+</script></body></html>

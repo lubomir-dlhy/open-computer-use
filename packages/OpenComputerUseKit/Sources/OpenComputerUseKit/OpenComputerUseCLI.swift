@@ -41,6 +41,35 @@ public func shouldUseMacOSAppAgentProxy(
     }
 }
 
+/// The app agent is launched through LaunchServices and does not share the
+/// caller's working directory, so relative `--args-file` / `--calls-file`
+/// paths are resolved here before the arguments are proxied.
+public func resolvingOpenComputerUseCallFilePaths(
+    _ arguments: [String],
+    currentDirectory: String = FileManager.default.currentDirectoryPath
+) -> [String] {
+    guard arguments.first == "call" else { return arguments }
+    var resolved = arguments
+    var index = 1
+    while index < arguments.count {
+        let option = arguments[index]
+        if ["--args-file", "--calls-file", "--args", "--calls", "--sleep"].contains(option) {
+            guard index + 1 < arguments.count else { break }
+            if option == "--args-file" || option == "--calls-file" {
+                resolved[index + 1] = URL(
+                    fileURLWithPath: arguments[index + 1],
+                    relativeTo: URL(fileURLWithPath: currentDirectory, isDirectory: true)
+                ).path
+            }
+            // Values are opaque, even when they happen to look like another option.
+            index += 2
+        } else {
+            index += 1
+        }
+    }
+    return resolved
+}
+
 public struct OpenComputerUseCLIError: LocalizedError, Equatable {
     public let message: String
     public let helpCommand: String?
@@ -120,6 +149,7 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
           snapshot <app>       Print the current accessibility snapshot for an app.
           call <tool>           Call one tool, or run a JSON array of tool calls.
           turn-ended           Notify the running MCP process that the host turn ended.
+          browser-setup [dir]  Register the Chrome extension's native host and copy the extension.
           help [command]       Show general or command-specific help.
           version              Print the CLI version.
 

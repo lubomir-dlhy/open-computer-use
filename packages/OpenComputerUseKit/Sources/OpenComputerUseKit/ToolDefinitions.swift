@@ -29,94 +29,105 @@ public struct ToolDefinition: @unchecked Sendable {
 }
 
 public enum ToolDefinitions {
-    public static let all: [ToolDefinition] = [
+    public static var all: [ToolDefinition] {
+        configured(virtualDisplayEnabled: VirtualDisplayConfig.current.enabled)
+    }
+
+    static func configured(virtualDisplayEnabled: Bool) -> [ToolDefinition] {
+        guard !virtualDisplayEnabled else { return definitions }
+        return definitions.map { tool in
+            guard tool.name == "get_app_state" else { return tool }
+            var schema = tool.inputSchema
+            var properties = schema["properties"] as? [String: Any] ?? [:]
+            properties.removeValue(forKey: "window_placement")
+            schema["properties"] = properties
+            return ToolDefinition(name: tool.name, description: tool.description, annotations: tool.annotations, inputSchema: schema)
+        }
+    }
+
+    private static let definitions: [ToolDefinition] = [
         ToolDefinition(
             name: "click",
-            description: "Click an element by index or pixel coordinates from screenshot. This tool is part of plugin `Computer Use`.",
+            description: "Click an element by index, at x/y pixel coordinates in the last screenshot, or a menu bar item by menu_path.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "element_index": stringProperty(description: "Element index to click"),
-                    "x": numberProperty(description: "X coordinate in screenshot pixel coordinates"),
-                    "y": numberProperty(description: "Y coordinate in screenshot pixel coordinates"),
-                    "click_count": integerProperty(description: "Number of clicks. Defaults to 1"),
-                    "mouse_button": stringProperty(
-                        description: "Mouse button to click. Defaults to left.",
-                        enumValues: ["left", "right", "middle"]
-                    ),
+                    "app": appProperty(),
+                    "element_index": elementIndexProperty(),
+                    "x": numberProperty(description: "Screenshot pixel X"),
+                    "y": numberProperty(description: "Screenshot pixel Y"),
+                    "click_count": integerProperty(description: "Default 1"),
+                    "mouse_button": stringProperty(description: "Default left", enumValues: ["left", "right", "middle"]),
                     "click_method": stringProperty(
-                        description: "Click implementation: auto (default), accessibility, app_post, sky_click, or global. Accessibility requires element_index. app_post sends a public event directly to the target app. sky_click uses the macOS SkyLight background window path. Global may move the system pointer and requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1.",
+                        description: "auto (default); accessibility needs element_index; app_post posts to the app; sky_click uses the SkyLight background-window path; global may move the pointer and needs OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1.",
                         enumValues: ClickMethod.allCases.map(\.rawValue)
                     ),
-                    "modifiers": stringArrayProperty(
-                        description: "Modifier keys held during the click (sky_click only): cmd, shift, option, control.",
-                        enumValues: ["cmd", "shift", "option", "control"]
-                    ),
+                    "modifiers": stringArrayProperty(description: "Held during the click (sky_click only)", enumValues: modifierNames),
+                    "hold": holdProperty(),
+                    "menu_item": stringProperty(description: "With element_index: open the element's context menu and choose this item in one step (preferred over a right-click then a second click)."),
+                    "menu_path": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "description": "Menu bar titles to press without opening the menu, e.g. [\"File\", \"New window\"] or [\"Apple\", \"About This Mac\"]. Case-insensitive; a unique prefix is enough.",
+                    ],
                 ],
                 required: ["app"]
             )
         ),
         ToolDefinition(
             name: "drag",
-            description: "Drag from one point to another using pixel coordinates. By default mouse events are posted directly to the target app and the system pointer does not move; that path cannot drive window-server drag sessions such as window moves, text selection, or Finder drag-and-drop. Those require OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 in the server process environment, which may move the real pointer. The result reports which path was used. This tool is part of plugin `Computer Use`.",
+            description: "Drag between screenshot pixel coordinates. The default path posts events to the app without moving the pointer, so it cannot drive window-server drags (window moves, text selection, or Finder drag-and-drop); those need OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 in the server environment and may move the real pointer. The result names the path used.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "from_x": numberProperty(description: "Start X coordinate"),
-                    "from_y": numberProperty(description: "Start Y coordinate"),
-                    "to_x": numberProperty(description: "End X coordinate"),
-                    "to_y": numberProperty(description: "End Y coordinate"),
+                    "app": appProperty(),
+                    "from_x": numberProperty(),
+                    "from_y": numberProperty(),
+                    "to_x": numberProperty(),
+                    "to_y": numberProperty(),
                     "drag_method": stringProperty(
-                        description: "auto (default) keeps the gate-based choice; sky posts through SkyLight to the target window without moving the system pointer, for Chromium web content; app_post and global force those paths.",
+                        description: "auto (default); sky posts via SkyLight to the window without moving the pointer, for Chromium web content; app_post and global force those paths.",
                         enumValues: DragMethod.allCases.map(\.rawValue)
                     ),
-                    "path": pointArrayProperty(
-                        description: "Intermediate [x, y] screenshot points visited in order between from and to (drag_method sky only), for curves and freehand strokes."
-                    ),
-                    "modifiers": stringArrayProperty(
-                        description: "Modifier keys held during the drag (drag_method sky only): cmd, shift, option, control.",
-                        enumValues: ["cmd", "shift", "option", "control"]
-                    ),
+                    "path": pointArrayProperty(description: "[x, y] waypoints between from and to (sky only)"),
+                    "modifiers": stringArrayProperty(description: "Held during the drag (sky only)", enumValues: modifierNames),
                 ],
                 required: ["app", "from_x", "from_y", "to_x", "to_y"]
             )
         ),
         ToolDefinition(
             name: "query",
-            description: "Targeted accessibility lookup: find controls in the app's current window using bounded AX traversal, with no full snapshot and no screenshot. Returns matches with truncated, stop_reason, visited_nodes and window_id metadata. Each match has a session-local `index` usable by the element actions (click, set_value, scroll, perform_secondary_action). Requires text and/or role. Only queries already-running apps; indexes expire after 120 seconds. This tool is part of plugin `Computer Use`.",
+            description: "Find controls in the app's current window by text and/or role, without a full tree or screenshot. Each match has an index usable by element actions for 120 s; the result reports truncated, stop_reason, visited_nodes and window_id. Running apps only.",
             annotations: readOnlyAnnotations(),
             inputSchema: objectSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "text": stringProperty(description: "Match text in the control's title, description or value (up to 1000 UTF-16 code units). Case-insensitive substring unless exact is true. Long fields are bounded and reported as truncated."),
-                    "role": stringProperty(description: "Match this accessibility role (the AX prefix is optional, e.g. button or AXButton)"),
-                    "exact": [
-                        "type": "boolean",
-                        "description": "Require a complete text match instead of a substring. Defaults to false. No substring retry.",
-                    ],
-                    "limit": positiveIntegerProperty(description: "Maximum matches to return. Defaults to 20; capped at 100."),
-                    "max_nodes": positiveIntegerProperty(description: "Node/queue cap for AX traversal. Defaults to 500; capped at 5000. Search has a 2-second cooperative deadline."),
-                    "window_id": positiveIntegerProperty(description: "Search this specific window (CGWindowID, 1–4294967295) instead of the app's current window."),
+                    "app": appProperty(),
+                    "text": stringProperty(description: "Case-insensitive substring of title, description or value (max 1000 UTF-16 units)"),
+                    "role": stringProperty(description: "AX role; prefix optional (button or AXButton)"),
+                    "exact": ["type": "boolean", "description": "Match the whole text. Default false"],
+                    "limit": positiveIntegerProperty(description: "Default 20, max 100"),
+                    "max_nodes": positiveIntegerProperty(description: "Traversal cap. Default 500, max 5000; 2 s deadline"),
+                    "window_id": positiveIntegerProperty(description: "CGWindowID to search instead of the current window"),
                 ],
                 required: ["app"]
             )
         ),
         ToolDefinition(
             name: "get_app_state",
-            description: "Start an app use session if needed, then get the state of the app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
+            description: "Start an app session if needed and return the key window's accessibility tree and a screenshot. Call once per turn before acting. Action results keep these element indices until the next call.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
-                    "include_ax": ["type": "boolean", "default": true, "description": "Include accessibility tree, focus and selection. False skips collection and invalidates previous element indexes; read AX again before element actions."],
-                    "include_screenshot": ["type": "boolean", "default": true, "description": "Capture and return a screenshot. False skips capture and encoding; screenshot-coordinate actions require a fresh screenshot."],
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "text_limit": textLimitProperty(description: "Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
-                    "max_tree_nodes": positiveIntegerProperty(description: "Maximum accessibility tree nodes to render. Defaults to 1200."),
-                    "max_tree_depth": positiveIntegerProperty(description: "Maximum accessibility tree depth to render. Defaults to 64."),
+                    "include_ax": ["type": "boolean", "default": true, "description": "False skips the tree and invalidates element indices"],
+                    "include_screenshot": ["type": "boolean", "description": "Default: a screenshot on first contact with a window or when its tree is thin. True always captures; false never does"],
+                    "app": appProperty(),
+                    "text_limit": textLimitProperty(description: "Max text chars, or \"max\". Default 500"),
+                    "max_tree_nodes": positiveIntegerProperty(description: "Default 1200"),
+                    "max_tree_depth": positiveIntegerProperty(description: "Default 64"),
+                    "window_id": positiveIntegerProperty(description: "Read this window (ids are listed under Other windows); later actions stay on it"),
+                    "keep_window": ["type": "boolean", "description": "Keep this window open when you finish. Windows you open are otherwise closed at the end of your turn."],
                     "window_placement": stringProperty(
-                        description: "keep (default) leaves the window where it is. agent_display (macOS) parks the app's window on an invisible display owned by the agent so a covered or other-Space window renders, exposes its full tree and accepts input without touching the user's Space, focus or pointer; the window disappears from the user's desktop until restore or process exit. restore puts it back.",
+                        description: "keep (default); agent_display parks the window on the agent's invisible display so a covered or other-Space window renders and takes input without touching the user's Space, focus or pointer (it leaves the user's desktop until restore or exit); restore puts it back.",
                         enumValues: WindowPlacement.allCases.map(\.rawValue)
                     ),
                 ],
@@ -125,96 +136,211 @@ public enum ToolDefinitions {
         ),
         ToolDefinition(
             name: "list_apps",
-            description: "List the apps on this computer. Returns the set of apps that are currently running, as well as any that have been used in the last 14 days, including details on usage frequency. This tool is part of plugin `Computer Use`.",
+            description: "List running apps and apps used in the last 14 days, with usage frequency.",
             annotations: readOnlyAnnotations(),
             inputSchema: objectSchema(properties: [:], required: [])
         ),
         ToolDefinition(
             name: "perform_secondary_action",
-            description: "Invoke a secondary accessibility action exposed by an element. This tool is part of plugin `Computer Use`.",
+            description: "Invoke a secondary accessibility action listed for an element.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "element_index": stringProperty(description: "Element identifier"),
-                    "action": stringProperty(description: "Secondary accessibility action name"),
+                    "app": appProperty(),
+                    "element_index": elementIndexProperty(),
+                    "action": stringProperty(description: "Action name as listed"),
                 ],
                 required: ["app", "element_index", "action"]
             )
         ),
         ToolDefinition(
             name: "press_key",
-            description: "Press a key or key-combination on the keyboard, including modifier and navigation keys.\n  - This supports xdotool's `key` syntax.\n  - Examples: \"a\", \"Return\", \"Tab\", \"super+c\", \"Up\", \"KP_0\" (for the numpad 0 key). This tool is part of plugin `Computer Use`.",
+            description: "Press a key or combination in xdotool `key` syntax, e.g. \"Return\", \"Tab\", \"super+c\", \"Up\", \"KP_0\".",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "key": stringProperty(description: "Key or key combination to press"),
+                    "app": appProperty(),
+                    "key": stringProperty(),
                     "key_method": keyMethodProperty(),
+                    "hold": holdProperty(),
                 ],
                 required: ["app", "key"]
             )
         ),
         ToolDefinition(
             name: "scroll",
-            description: "Scroll an element in a direction by a number of pages. This tool is part of plugin `Computer Use`.",
+            description: "Scroll an element, or the view under x/y in the last screenshot, by pages.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "direction": stringProperty(description: "Scroll direction: up, down, left, or right"),
-                    "element_index": stringProperty(description: "Element identifier"),
-                    "pages": numberProperty(description: "Number of pages to scroll. Fractional values are supported. Defaults to 1"),
+                    "app": appProperty(),
+                    "direction": stringProperty(description: "up, down, left or right"),
+                    "element_index": elementIndexProperty(),
+                    "x": numberProperty(description: "Screenshot pixel X, instead of element_index"),
+                    "y": numberProperty(description: "Screenshot pixel Y"),
+                    "pages": numberProperty(description: "Fractional allowed. Default 1"),
                 ],
-                required: ["app", "element_index", "direction"]
+                required: ["app", "direction"]
             )
         ),
         ToolDefinition(
             name: "set_value",
-            description: "Set the value of a settable accessibility element. This tool is part of plugin `Computer Use`.",
+            description: "Set the value of a settable element and verify the actual value (text compared exactly; an empty string clears it). An unverified write is an error.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "element_index": stringProperty(description: "Element identifier"),
-                    "value": stringProperty(description: "Value to assign"),
+                    "app": appProperty(),
+                    "element_index": elementIndexProperty(),
+                    "value": stringProperty(),
+                    "secret_env": secretEnvProperty(),
                 ],
-                required: ["app", "element_index", "value"]
+                required: ["app", "element_index"]
             )
         ),
         ToolDefinition(
             name: "select_text",
-            description: "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it. This tool is part of plugin `Computer Use`.",
+            description: "Select text in a text element, or put the cursor before or after it. Give the text exactly as in the tree, including Markdown; add prefix or suffix if it repeats.",
             annotations: defaultAnnotations(),
-            inputSchema: objectSchema(
+            inputSchema: actionSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "element_index": stringProperty(description: "Text element identifier"),
-                    "text": stringProperty(description: "Target text as shown in the accessibility tree"),
-                    "prefix": stringProperty(description: "Optional text immediately before the target, used to disambiguate repeated matches"),
-                    "suffix": stringProperty(description: "Optional text immediately after the target, used to disambiguate repeated matches"),
-                    "selection": stringProperty(
-                        description: "Whether to select the text or place the cursor before or after it. Defaults to text.",
-                        enumValues: TextSelectionMode.allCases.map(\.rawValue)
-                    ),
+                    "app": appProperty(),
+                    "element_index": elementIndexProperty(),
+                    "text": stringProperty(),
+                    "prefix": stringProperty(description: "Text just before the target"),
+                    "suffix": stringProperty(description: "Text just after the target"),
+                    "selection": stringProperty(description: "Default text", enumValues: TextSelectionMode.allCases.map(\.rawValue)),
                 ],
                 required: ["app", "element_index", "text"]
             )
         ),
         ToolDefinition(
             name: "type_text",
-            description: "Type literal text using keyboard input. This tool is part of plugin `Computer Use`.",
+            description: "Type literal text into the focused element.",
+            annotations: defaultAnnotations(),
+            inputSchema: actionSchema(
+                properties: [
+                    "app": appProperty(),
+                    "text": stringProperty(),
+                    "secret_env": secretEnvProperty(),
+                    "key_method": keyMethodProperty(),
+                    "paste": ["type": "boolean", "description": "Paste instead of typing; the user's clipboard is restored"],
+                    "format": stringProperty(description: "With paste: text (default), html or markdown (pasted as rich text)", enumValues: ["text", "html", "markdown"]),
+                ],
+                required: ["app"]
+            )
+        ),
+        ToolDefinition(
+            name: "batch",
+            description: "Run several actions on one app in one call, with no read-back between steps, and return one result. Indices in every step refer to the state before the batch. Stops at the first failing step.",
+            annotations: defaultAnnotations(),
+            inputSchema: actionSchema(
+                properties: [
+                    "app": appProperty(),
+                    "steps": [
+                        "type": "array",
+                        "description": "Each step is {tool, ...that tool's arguments}; a step's wait_for holds the next step until it is met.",
+                        "items": [
+                            "type": "object",
+                            "properties": ["tool": ["type": "string", "enum": ComputerUseToolDispatcher.actionTools.sorted()]],
+                            "required": ["tool"],
+                        ],
+                        "minItems": 1,
+                        "maxItems": 50,
+                    ],
+                ],
+                required: ["app", "steps"]
+            )
+        ),
+        ToolDefinition(
+            name: "browser",
+            description: "Drive Chrome tabs in the background through the Open Computer Use Browser extension: Chrome never comes forward and the user's tabs stay untouched. Start with open (a new background tab, in the profile that fits the task) or tabs then claim. A snapshot lists the page as [ref] role \"name\" state lines; refs stay valid while the element exists, and actions return only what changed. For prices and stock, try extract (structured product data) or requests (the site's own API responses) before reading the layout. A task you will repeat (a price check for other products) can be saved after doing it once with flow_save, then run with flow_run and new params; flows are experimental, so continue in the page if a run fails. Tabs you open close when your turn ends unless you keep them; claimed tabs are released.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
-                    "app": stringProperty(description: "App name or bundle identifier"),
-                    "text": stringProperty(description: "Literal text to type"),
-                    "key_method": keyMethodProperty(),
+                    "action": stringProperty(enumValues: BrowserTool.actions),
+                    "tab": integerProperty(description: "Tab id; defaults to the tab you used last"),
+                    "profile": stringProperty(description: BrowserProfiles.parameterDescription()),
+                    "url": stringProperty(description: "open, navigate; wait: a URL fragment to wait for"),
+                    "ref": integerProperty(description: "Element ref from the snapshot; snapshot: only that element's part of the page"),
+                    "selector": stringProperty(description: "CSS selector instead of ref (searches open shadow roots and same-origin frames); extract: an embedded JSON script to read"),
+                    "name": stringProperty(description: "Visible name or text instead of ref"),
+                    "x": numberProperty(description: "Viewport CSS pixel X instead of an element"),
+                    "y": numberProperty(),
+                    "to_ref": integerProperty(description: "drag destination; also to_selector, to_name, to_x, to_y"),
+                    "to_selector": stringProperty(),
+                    "to_name": stringProperty(),
+                    "to_x": numberProperty(),
+                    "to_y": numberProperty(),
+                    "drag_method": stringProperty(description: "auto (default): a trusted HTML5 drag when the source is draggable, else a pointer drag", enumValues: ["auto", "pointer", "js"]),
+                    "text": stringProperty(description: "type: inserted into the element (focused first) or the focused field; dialog: prompt answer"),
+                    "secret_env": secretEnvProperty(),
+                    "clear": ["type": "boolean", "description": "type: replace the field's current value"],
+                    "format": stringProperty(description: "type: text (default), or html / markdown pasted as rich text", enumValues: ["text", "html", "markdown"]),
+                    "key": stringProperty(description: "e.g. Enter, Tab, Escape, ArrowDown, cmd+a, shift+Tab"),
+                    "button": stringProperty(enumValues: ["left", "right", "middle"]),
+                    "click_count": integerProperty(description: "2 for a double-click"),
+                    "modifiers": stringArrayProperty(description: "Held during the click", enumValues: modifierNames),
+                    "hold": numberProperty(description: "click, key: seconds to hold before release"),
+                    "force": ["type": "boolean", "description": "click even when another element covers the target"],
+                    "direction": stringProperty(enumValues: ["up", "down", "left", "right"]),
+                    "amount": numberProperty(description: "scroll: viewport heights, default 1"),
+                    "value": stringProperty(description: "select: option text or value of a native <select>"),
+                    "files": ["type": "array", "items": ["type": "string"], "description": "upload: absolute file paths"],
+                    "accept": ["type": "boolean", "description": "dialog: true accepts (default), false dismisses"],
+                    "status": stringProperty(description: "keep: deliverable (default) or handoff", enumValues: ["deliverable", "handoff"]),
+                    "expression": stringProperty(description: "evaluate: JavaScript run in the page; promises are awaited and the JSON value returned"),
+                    "load": stringProperty(description: "wait: load state; networkidle also waits until nothing loads for 0.5 s", enumValues: ["domcontentloaded", "load", "networkidle"]),
+                    "find": stringProperty(description: "snapshot: only lines matching this regex (case-insensitive), with a line of context"),
+                    "filter": stringProperty(description: "requests: URL substring or regex"),
+                    "type": stringProperty(description: "requests: resource types, comma-separated (xhr, fetch, document, script, image, …) or all; default documents, XHR, fetch and JSON of the current page"),
+                    "request": stringProperty(description: "requests: an id such as r12, to read that response's body"),
+                    "flow": stringProperty(description: "flow_save, flow_run: the saved flow's name (site/name when several sites share it)"),
+                    "params": ["type": "object", "description": "flow_save: param name to the example value the recording used; flow_run: param name to value"],
+                    "output": stringProperty(description: "flow_save: the request id (r12) that answers the task, or extract for the page's product data; default: the JSON response that used a param"),
+                    "description": stringProperty(description: "flow_save: what the flow answers"),
+                    "fields": stringProperty(description: "flow_run: comma-separated field paths to keep (price,stock.qty)"),
+                    "where": stringProperty(description: "flow_run: field=value filters over the answer's list (case-insensitive substring)"),
+                    "limit": integerProperty(description: "flow_run: at most this many list items"),
+                    "max_chars": integerProperty(description: "Size budget for snapshots, extract and response bodies (default 6000, bodies 8000)"),
+                    "state": stringProperty(description: "diff (default) returns changes; full the whole snapshot; none just ok", enumValues: ["diff", "full", "none"]),
+                    "wait_for": stringProperty(description: "Text to wait for on the page; \"!text\" waits until it is gone"),
+                    "wait_timeout": numberProperty(),
                 ],
-                required: ["app", "text"]
+                required: ["action"]
             )
         ),
     ]
+}
+
+private let modifierNames = ["cmd", "shift", "option", "control"]
+
+/// Every action accepts the same result options, documented once in the server instructions.
+private func actionSchema(properties: [String: Any], required: [String]) -> [String: Any] {
+    objectSchema(
+        properties: properties.merging([
+            "state": stringProperty(enumValues: ActionStateMode.allCases.map(\.rawValue)),
+            "screenshot": ["type": "boolean"],
+            "wait_for": stringProperty(),
+            "wait_timeout": numberProperty(),
+        ]) { current, _ in current },
+        required: required
+    )
+}
+
+private func holdProperty() -> [String: Any] {
+    numberProperty(description: "Seconds to hold before release")
+}
+
+private func appProperty() -> [String: Any] {
+    stringProperty(description: "App name or bundle id")
+}
+
+private func secretEnvProperty() -> [String: Any] {
+    stringProperty(description: "Instead of the literal text: name of an environment variable in the Open Computer Use process (e.g. a password). Its value is used but never returned.")
+}
+
+private func elementIndexProperty() -> [String: Any] {
+    ["type": "string"]
 }
 
 private func objectSchema(properties: [String: Any], required: [String]) -> [String: Any] {
@@ -249,16 +375,16 @@ private func readOnlyAnnotations() -> [String: Any] {
 
 private func keyMethodProperty() -> [String: Any] {
     stringProperty(
-        description: "Keyboard delivery: auto (default) or sky_key. sky_key posts authenticated keyboard events through the macOS SkyLight background-window path to the current target window without changing foreground focus. Requires a current on-screen target window from get_app_state.",
+        description: "auto (default; press_key uses sky_key while the app is in the background), or sky_key: authenticated SkyLight key events to the current target window without changing focus. Try sky_key when auto has no effect.",
         enumValues: KeyMethod.allCases.map(\.rawValue)
     )
 }
 
-private func stringProperty(description: String, enumValues: [String]? = nil) -> [String: Any] {
-    var property: [String: Any] = [
-        "type": "string",
-        "description": description,
-    ]
+private func stringProperty(description: String? = nil, enumValues: [String]? = nil) -> [String: Any] {
+    var property: [String: Any] = ["type": "string"]
+    if let description {
+        property["description"] = description
+    }
 
     if let enumValues {
         property["enum"] = enumValues
@@ -319,9 +445,6 @@ private func textLimitProperty(description: String) -> [String: Any] {
     ]
 }
 
-private func numberProperty(description: String) -> [String: Any] {
-    [
-        "type": "number",
-        "description": description,
-    ]
+private func numberProperty(description: String? = nil) -> [String: Any] {
+    description.map { ["type": "number", "description": $0] } ?? ["type": "number"]
 }
